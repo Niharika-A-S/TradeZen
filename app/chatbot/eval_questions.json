@@ -1,0 +1,22 @@
+[
+  {"question": "What is a stop-loss?", "expected_chunk_id": "glossary:stop_loss"},
+  {"question": "How do you calculate position size?", "expected_chunk_id": "glossary:position_size"},
+  {"question": "What does risk per trade mean?", "expected_chunk_id": "glossary:risk_per_trade"},
+  {"question": "Explain drawdown in trading", "expected_chunk_id": "glossary:drawdown"},
+  {"question": "What is a win rate?", "expected_chunk_id": "glossary:win_rate"},
+  {"question": "How do average win and average loss affect payoff ratio?", "expected_chunk_id": "glossary:average_win_average_loss_and_payoff_ratio"},
+  {"question": "What is trading expectancy formula?", "expected_chunk_id": "glossary:expectancy"},
+  {"question": "How is break-even win rate calculated?", "expected_chunk_id": "glossary:break_even_win_rate"},
+  {"question": "What is the difference between realised and unrealised P&L?", "expected_chunk_id": "glossary:realised_and_unrealised_p_l"},
+  {"question": "What does a candlestick chart show?", "expected_chunk_id": "glossary:candlestick"},
+  {"question": "What is volatility?", "expected_chunk_id": "glossary:volatility"},
+  {"question": "What is slippage in order execution?", "expected_chunk_id": "glossary:slippage"},
+  {"question": "How does leverage and margin work?", "expected_chunk_id": "glossary:leverage_and_margin"},
+  {"question": "What is overtrading?", "expected_chunk_id": "glossary:overtrading"},
+  {"question": "What is paper trading virtual money?", "expected_chunk_id": "glossary:paper_trading"},
+  {"question": "What is risk-reward ratio?", "expected_chunk_id": "glossary:risk_reward_ratio"},
+  {"question": "How do replay and live modes work in TradeZen?", "expected_chunk_id": "platform_guide:replay_and_live_modes"},
+  {"question": "How does the TradeZen paper broker handle orders?", "expected_chunk_id": "platform_guide:paper_broker_and_orders"},
+  {"question": "What did the SEBI study find about FY22 F&O traders?", "expected_chunk_id": "investor_education:sebi_study_on_fy22_derivatives_trading"},
+  {"question": "Why do traders do revenge trading?", "expected_chunk_id": "revenge_trading:why_it_happens"}
+]
