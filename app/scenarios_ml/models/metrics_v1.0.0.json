@@ -1,13 +1,13 @@
 {
   "model_version": "v1.0.0",
-  "selected_model": "logistic_regression",
+  "selected_model": "xgboost",
   "macro_f1": 1.0,
   "accuracy": 1.0,
   "logistic_regression_macro_f1": 1.0,
-  "xgboost_macro_f1": 0.9937,
+  "xgboost_macro_f1": 1.0,
   "confusion_matrix": [
     [
-      68,
+      74,
       0,
       0,
       0,
@@ -15,7 +15,7 @@
     ],
     [
       0,
-      32,
+      31,
       0,
       0,
       0
@@ -23,7 +23,7 @@
     [
       0,
       0,
-      29,
+      31,
       0,
       0
     ],
@@ -31,7 +31,7 @@
       0,
       0,
       0,
-      36,
+      33,
       0
     ],
     [
@@ -39,7 +39,7 @@
       0,
       0,
       0,
-      35
+      31
     ]
   ],
   "classification_report": {
@@ -47,31 +47,31 @@
       "precision": 1.0,
       "recall": 1.0,
       "f1-score": 1.0,
-      "support": 68.0
+      "support": 74.0
     },
     "panic_sell": {
       "precision": 1.0,
       "recall": 1.0,
       "f1-score": 1.0,
-      "support": 32.0
+      "support": 31.0
     },
     "averaging_down": {
       "precision": 1.0,
       "recall": 1.0,
       "f1-score": 1.0,
-      "support": 29.0
+      "support": 31.0
     },
     "fomo_buy": {
       "precision": 1.0,
       "recall": 1.0,
       "f1-score": 1.0,
-      "support": 36.0
+      "support": 33.0
     },
     "revenge_trade": {
       "precision": 1.0,
       "recall": 1.0,
       "f1-score": 1.0,
-      "support": 35.0
+      "support": 31.0
     },
     "accuracy": 1.0,
     "macro avg": {

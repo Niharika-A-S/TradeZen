@@ -23,6 +23,20 @@ def get_current_rule(
         .filter(Rule.user_id == current_user.id, Rule.is_current.is_(True))
         .first()
     )
+    if not rule:
+        rule = Rule(
+            user_id=current_user.id,
+            version=1,
+            stop_loss_pct=2.0,
+            max_trades_per_day=5,
+            no_averaging_down=True,
+            max_position_pct=20.0,
+            practice_capital=100000.0,
+            is_current=True,
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
     return rule
 
 

@@ -75,19 +75,6 @@ INSTRUMENT_KEYS = {
     "ITC": "NSE_EQ|INE154A01025",
     "KOTAKBANK": "NSE_EQ|INE237A01028",
     "LT": "NSE_EQ|INE018A01030",
-    "TATAMOTORS": "NSE_EQ|INE155A01022",
-    "TMPV": "NSE_EQ|INE155A01022",
-    "LTIM": "NSE_EQ|INE214T01019",
-    "LTM": "NSE_EQ|INE214T01019",
-    "ZOMATO": "NSE_EQ|INE758T01015",
-    "ETERNAL": "NSE_EQ|INE758T01015",
-}
-
-# Known symbol aliases (e.g., corporate renames or NSE trading symbol changes)
-SYMBOL_ALIASES = {
-    "TATAMOTORS": "TMPV",
-    "LTIM": "LTM",
-    "ZOMATO": "ETERNAL",
 }
 
 # Shared state across client instances
@@ -229,12 +216,7 @@ class UpstoxClient:
                         continue
 
                     # Other 4xx client errors
-                    logger.warning(
-                        "Upstox returned unexpected status %d for %s. Response body: %s",
-                        resp.status_code,
-                        url,
-                        resp.text[:300] if resp.text else "",
-                    )
+                    logger.warning("Upstox returned unexpected status %d for %s", resp.status_code, url)
                     return resp
 
             except UpstoxAuthError:
@@ -317,32 +299,19 @@ class UpstoxClient:
         self._instruments_loaded = True
         return self._instruments_map
 
-    def get_instrument_key(self, symbol: str) -> Optional[str]:
-        """Looks up the Upstox instrument_key for a trading symbol (e.g. RELIANCE -> NSE_EQ|INE002A01018).
-
-        Returns None if symbol cannot be resolved to a valid instrument key with ISIN.
-        """
+    def get_instrument_key(self, symbol: str) -> str:
+        """Looks up the Upstox instrument_key for a trading symbol (e.g. RELIANCE -> NSE_EQ|INE002A01018)."""
         sym = symbol.strip().upper()
         if not self._instruments_loaded:
             self.load_instruments()
 
-        # 1. Direct lookup in loaded instruments map
         if sym in self._instruments_map:
             return self._instruments_map[sym]
-
-        # 2. Lookup alias in loaded instruments map
-        if sym in SYMBOL_ALIASES:
-            alias = SYMBOL_ALIASES[sym]
-            if alias in self._instruments_map:
-                return self._instruments_map[alias]
-
-        # 3. Static fallback dictionary
         if sym in INSTRUMENT_KEYS:
             return INSTRUMENT_KEYS[sym]
 
-        # 4. Unknown symbol without valid ISIN mapping
-        logger.warning("Could not resolve valid Upstox instrument key for symbol: %s", sym)
-        return None
+        # Standard fallback format
+        return f"NSE_EQ|{sym}"
 
     # -------------------------------------------------------------------------
     # Market Status & Timings
@@ -575,17 +544,10 @@ class UpstoxClient:
             return []
 
         instrument_key = self.get_instrument_key(symbol)
-        if not instrument_key:
-            logger.warning("Skipping historical candles fetch for %s: unresolved instrument key.", symbol)
-            return []
-
         date_str = trading_date.strftime("%Y-%m-%d")
 
-        # Upstox Historical Candle V3 requires instrument key in path.
-        # We ensure pipe characters are properly URL-encoded (e.g. NSE_EQ%7CINE002A01018).
-        import urllib.parse
-        encoded_instrument_key = urllib.parse.quote(instrument_key, safe="")
-        endpoint = f"{self._base_url}/v3/historical-candle/{encoded_instrument_key}/minutes/1/{date_str}/{date_str}"
+        # Upstox Historical Candle V3: /v3/historical-candle/{instrument_key}/minutes/1/{to_date}/{from_date}
+        endpoint = f"{self._base_url}/v3/historical-candle/{instrument_key}/minutes/1/{date_str}/{date_str}"
 
         try:
             resp = self._execute_request_with_retry("GET", endpoint)

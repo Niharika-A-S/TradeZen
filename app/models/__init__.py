@@ -18,6 +18,7 @@ from app.models.alert import Alert, AlertSeverity, AlertType
 from app.models.scenario import Scenario, RawCandle, PoolReport
 from app.models.rule import Rule
 from app.models.decision import Attempt, BotDecision, Prediction
+from app.models.reason import ScnReason
 
 __all__ = [
     "Base",
@@ -45,4 +46,5 @@ __all__ = [
     "Attempt",
     "BotDecision",
     "Prediction",
+    "ScnReason",
 ]

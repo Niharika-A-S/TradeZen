@@ -12,6 +12,7 @@ pytest-asyncio==1.4.0
 httpx==0.28.1
 websockets==17.1
 protobuf==7.36.2
+upstox-python-sdk>=2.20
 xgboost==3.4.1
 scikit-learn==1.9.1
 shap==0.52.0

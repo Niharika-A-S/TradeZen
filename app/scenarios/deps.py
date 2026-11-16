@@ -47,12 +47,14 @@ def clear_failed_logins(ip: str, email: str) -> None:
 
 
 def get_current_user(
-    request: Request,
+    request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """Ensures user is authenticated and returns User entity."""
+    """Ensures user is authenticated and returns User entity. Falls back to default user if guest."""
     user = auth_get_current_user(request=request, credentials=credentials, db=db)
+    if not user:
+        user = db.query(User).filter(User.id == 1).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

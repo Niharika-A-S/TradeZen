@@ -13,6 +13,30 @@ import {
 import CandlestickChart from './CandlestickChart';
 import { api } from '../api';
 
+const REASON_MESSAGES = {
+  token_problem: 'Token Problem',
+  connecting: 'Connecting...',
+  market_closed: 'Market Closed',
+  no_ticks_yet: 'Waiting for ticks...',
+  feed_error: 'Feed Error',
+  feed_disabled: 'Feed Disabled',
+  live_feed_not_installed: 'Feed Not Installed',
+  unknown_symbol: 'Unknown Symbol',
+};
+
+const formatIST = (isoStr) => {
+  if (!isoStr) return '--:--:-- IST';
+  try {
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) {
+      return String(isoStr).slice(11, 19) + ' IST';
+    }
+    return d.toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' }) + ' IST';
+  } catch {
+    return String(isoStr).slice(11, 19) + ' IST';
+  }
+};
+
 export default function TradingView({
   symbols = ['INFY', 'RELIANCE', 'TCS', 'HDFCBANK', 'SBIN'],
   selectedSymbol,
@@ -22,6 +46,8 @@ export default function TradingView({
   onOrderPlaced,
   userRules,
   userId = 1,
+  isLiveMode = false,
+  livePrices = {},
 }) {
   const [side, setSide] = useState('BUY');
   const [orderType, setOrderType] = useState('MARKET');
@@ -37,14 +63,20 @@ export default function TradingView({
   const [submitError, setSubmitError] = useState(null);
   const [submitSuccess, setSubmitSuccess] = useState(null);
 
+  // Current effective price (live tick if in live mode, else replay bar close)
+  const selectedLive = isLiveMode ? livePrices?.[selectedSymbol] : null;
+  const liveLtp = selectedLive?.ok ? selectedLive.ltp : null;
+  const effectiveMarketPrice = isLiveMode ? liveLtp : (currentPrice?.close || null);
+
   // Sync limit price default to current market price
   useEffect(() => {
-    if (currentPrice && !limitPrice) {
-      setLimitPrice(currentPrice.close.toFixed(2));
+    const priceToSync = effectiveMarketPrice;
+    if (priceToSync && !limitPrice) {
+      setLimitPrice(priceToSync.toFixed(2));
     }
-  }, [currentPrice]);
+  }, [effectiveMarketPrice]);
 
-  const activePrice = orderType === 'LIMIT' && limitPrice ? parseFloat(limitPrice) : (currentPrice?.close || 0);
+  const activePrice = orderType === 'LIMIT' && limitPrice ? parseFloat(limitPrice) : (effectiveMarketPrice || 0);
   const orderValue = activePrice * (quantity || 0);
 
   // Suggested risk estimation based on stop loss
@@ -65,6 +97,10 @@ export default function TradingView({
     }
     if (orderType === 'LIMIT' && (!priceNum || priceNum <= 0)) {
       setSubmitError('Please specify a valid limit price.');
+      return;
+    }
+    if (orderType === 'MARKET' && (!activePrice || activePrice <= 0)) {
+      setSubmitError('Market price is currently unavailable. Please wait for a live quote or place a Limit order.');
       return;
     }
 
@@ -117,42 +153,126 @@ export default function TradingView({
     <div className="flex flex-col gap-4">
       {/* Stock Selection Pills */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11161F] p-3 rounded-lg border border-[#2A313C]">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-[#9CA3AF] uppercase font-mono mr-1">Watchlist:</span>
           {symbols.map((sym) => {
             const isSelected = sym === selectedSymbol;
+            const symLive = isLiveMode ? livePrices?.[sym] : null;
+
             return (
               <button
                 key={sym}
                 onClick={() => onSelectSymbol(sym)}
-                className={`px-3 py-1.5 rounded text-xs font-semibold font-mono tracking-wider transition-all ${
+                className={`px-3 py-1.5 rounded text-xs font-semibold font-mono tracking-wider transition-all flex items-center gap-1.5 ${
                   isSelected
                     ? 'bg-[#3B82F6] text-[#F9FAFB] shadow-md shadow-[#3B82F6]/20'
                     : 'bg-[#1A1F29] text-[#D1D5DB] border border-[#2A313C] hover:border-[#3B82F6]/50 hover:text-[#F9FAFB]'
                 }`}
               >
-                {sym}
+                <span>{sym}</span>
+                {isLiveMode && symLive?.ok && symLive?.ltp && (
+                  <span className="text-[11px] font-normal opacity-90">
+                    ₹{Number(symLive.ltp).toFixed(1)}
+                  </span>
+                )}
+                {isLiveMode && symLive?.ok && symLive?.change_pct !== null && symLive?.change_pct !== undefined && (
+                  <span
+                    className={`text-[10px] font-bold ${
+                      symLive.change_pct >= 0 ? 'text-[#34D399]' : 'text-[#F87171]'
+                    }`}
+                  >
+                    {symLive.change_pct >= 0 ? '+' : ''}
+                    {Number(symLive.change_pct).toFixed(1)}%
+                  </span>
+                )}
+                {isLiveMode && symLive && !symLive.ok && (
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    {REASON_MESSAGES[symLive.reason] || 'Offline'}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
 
-        {/* Live Market Price Header for Selected Stock */}
-        {currentPrice && (
+        {/* Price & Status Header for Selected Stock */}
+        {isLiveMode ? (
           <div className="flex items-center gap-4">
-            <div className="text-right">
-              <span className="text-xs text-[#9CA3AF] font-mono block">Current Price</span>
-              <span className="text-lg font-bold font-mono text-[#F9FAFB]">
-                ₹{currentPrice.close.toFixed(2)}
-              </span>
-            </div>
-            <div className="text-right pl-3 border-l border-[#2A313C]">
-              <span className="text-[10px] text-[#9CA3AF] font-mono block">Day Range</span>
-              <span className="text-xs font-mono text-[#D1D5DB]">
-                ₹{currentPrice.low.toFixed(1)} - ₹{currentPrice.high.toFixed(1)}
-              </span>
-            </div>
+            {selectedLive?.ok ? (
+              <>
+                <div className="text-right">
+                  <div className="flex items-center justify-end gap-1.5 mb-0.5">
+                    <span className="text-xs text-[#9CA3AF] font-mono">Live LTP</span>
+                    {selectedLive.market_status && selectedLive.market_status !== 'NORMAL_OPEN' && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/40">
+                        MARKET CLOSED
+                      </span>
+                    )}
+                    {selectedLive.stale && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider bg-yellow-500/20 text-yellow-300 border border-yellow-500/40">
+                        STALE
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-baseline justify-end gap-2">
+                    <span className="text-lg font-bold font-mono text-[#F9FAFB]">
+                      ₹{Number(selectedLive.ltp).toFixed(2)}
+                    </span>
+                    {selectedLive.change !== null && selectedLive.change !== undefined && (
+                      <span
+                        className={`text-xs font-mono font-semibold ${
+                          selectedLive.change >= 0 ? 'text-[#34D399]' : 'text-[#F87171]'
+                        }`}
+                      >
+                        {selectedLive.change >= 0 ? '+' : ''}
+                        ₹{Number(selectedLive.change).toFixed(2)} (
+                        {selectedLive.change_pct >= 0 ? '+' : ''}
+                        {Number(selectedLive.change_pct).toFixed(2)}%)
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="text-right pl-3 border-l border-[#2A313C]">
+                  <span className="text-[10px] text-[#9CA3AF] font-mono block">Last Trade (IST)</span>
+                  <span className="text-xs font-mono text-[#D1D5DB]">
+                    {formatIST(selectedLive.last_trade_time)}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded bg-[#1A1F29] border border-amber-500/30 text-amber-400 text-xs font-mono">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                <span>
+                  {selectedLive?.reason
+                    ? (REASON_MESSAGES[selectedLive.reason] || selectedLive.reason)
+                    : 'Connecting to Live Feed...'}
+                </span>
+                {selectedLive?.detail && (
+                  <span className="text-[10px] text-[#9CA3AF] max-w-xs truncate" title={selectedLive.detail}>
+                    ({selectedLive.detail})
+                  </span>
+                )}
+              </div>
+            )}
           </div>
+        ) : (
+          currentPrice && (
+            <div className="flex items-center gap-4">
+              <div className="text-right">
+                <span className="text-xs text-[#9CA3AF] font-mono block">Replay Price</span>
+                <span className="text-lg font-bold font-mono text-[#F9FAFB]">
+                  ₹{Number(currentPrice.close).toFixed(2)}
+                </span>
+              </div>
+              <div className="text-right pl-3 border-l border-[#2A313C]">
+                <span className="text-[10px] text-[#9CA3AF] font-mono block">Day Range</span>
+                <span className="text-xs font-mono text-[#D1D5DB]">
+                  ₹{Number(currentPrice.low).toFixed(1)} - ₹{Number(currentPrice.high).toFixed(1)}
+                </span>
+              </div>
+            </div>
+          )
         )}
       </div>
 
@@ -163,7 +283,8 @@ export default function TradingView({
           <CandlestickChart
             bars={bars}
             symbol={selectedSymbol}
-            currentPrice={currentPrice?.close}
+            currentPrice={effectiveMarketPrice || currentPrice?.close}
+            isLiveMode={isLiveMode}
           />
         </div>
 

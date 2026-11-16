@@ -16,16 +16,37 @@ import {
   ArrowDownRight,
   Sliders,
   Play,
-  RotateCcw
+  RotateCcw,
+  Plus,
+  Minus,
+  Equal,
+  Sparkles,
+  Info,
 } from 'lucide-react';
 
 export default function ScenarioPracticeView({ currentUser }) {
-  const [subTab, setSubTab] = useState('trainer'); // 'trainer' | 'dashboard' | 'history' | 'rules'
+  const [subTab, setSubTab] = useState('trainer'); // 'trainer' | 'rules' | 'dashboard' | 'history'
+
+  // Rules state
+  const [stopLoss, setStopLoss] = useState(2.0);
+  const [maxTrades, setMaxTrades] = useState(5);
+  const [noAveraging, setNoAveraging] = useState(true);
+  const [maxPosition, setMaxPosition] = useState(20.0);
+  const [practiceCapital, setPracticeCapital] = useState(100000.0);
+  const [ruleHistory, setRuleHistory] = useState([]);
+  const [hasRules, setHasRules] = useState(false);
+  const [rulesSuccessMessage, setRulesSuccessMessage] = useState('');
+  const [rulesErrorMessage, setRulesErrorMessage] = useState('');
+
+  // Practice Trainer State
   const [scenarios, setScenarios] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedAction, setSelectedAction] = useState('buy'); // 'buy' | 'sell' | 'hold'
   const [decisionSize, setDecisionSize] = useState(10000);
-  const [decisionReason, setDecisionReason] = useState('Followed my rule');
+  const [selectedReasonCode, setSelectedReasonCode] = useState('');
+  const [reasonsByAction, setReasonsByAction] = useState({});
+  const [reasonsLoading, setReasonsLoading] = useState(false);
+  const [decisionError, setDecisionError] = useState('');
   const [decisionNote, setDecisionNote] = useState('');
   const [decisionSeconds, setDecisionSeconds] = useState(5.0);
   const [scenarioStartTime, setScenarioStartTime] = useState(Date.now());
@@ -39,30 +60,74 @@ export default function ScenarioPracticeView({ currentUser }) {
   // History & Dashboard State
   const [pastAttempts, setPastAttempts] = useState([]);
   const [dashboardData, setDashboardData] = useState(null);
+  const [dataHealth, setDataHealth] = useState(null);
 
-  // Rules state
-  const [stopLoss, setStopLoss] = useState(2.0);
-  const [maxTrades, setMaxTrades] = useState(5);
-  const [noAveraging, setNoAveraging] = useState(true);
-  const [maxPosition, setMaxPosition] = useState(20.0);
-  const [practiceCapital, setPracticeCapital] = useState(100000.0);
-  const [rulesSuccessMessage, setRulesSuccessMessage] = useState('');
+  const formatPoolDate = (dateStr) => {
+    if (!dateStr) return '';
+    try {
+      const parts = dateStr.split('-');
+      if (parts.length < 3) return dateStr;
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const mIdx = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      return `${day} ${months[mIdx] || ''}`;
+    } catch {
+      return dateStr;
+    }
+  };
+
+  const loadDataHealth = async () => {
+    try {
+      if (typeof api?.getDataHealth === 'function') {
+        const dh = await api.getDataHealth();
+        setDataHealth(dh);
+      }
+    } catch {
+      // quiet fallback
+    }
+  };
+
+  const loadRules = async () => {
+    try {
+      if (typeof api?.getScenarioRules === 'function') {
+        const rule = await api.getScenarioRules();
+        if (rule) {
+          setHasRules(true);
+          setStopLoss(rule.stop_loss_pct ?? 2.0);
+          setMaxTrades(rule.max_trades_per_day ?? 5);
+          setNoAveraging(rule.no_averaging_down ?? true);
+          setMaxPosition(rule.max_position_pct ?? 20.0);
+          setPracticeCapital(rule.practice_capital ?? 100000.0);
+          setDecisionSize(Math.round((rule.practice_capital ?? 100000.0) * ((rule.max_position_pct ?? 20.0) / 100) * 0.5));
+        } else {
+          setHasRules(false);
+        }
+      }
+      if (typeof api?.getScenarioRuleHistory === 'function') {
+        const history = await api.getScenarioRuleHistory();
+        setRuleHistory(history || []);
+      }
+    } catch (err) {
+      console.warn('Failed to load rules', err);
+    }
+  };
 
   const loadScenarios = async () => {
     try {
       setLoading(true);
       setLoadError(null);
-      const data = await api.getNextScenarios(15);
-      if (Array.isArray(data) && data.length > 0) {
-        setScenarios(data);
-        setCurrentIndex(0);
-      } else {
-        setScenarios([]);
+      if (typeof api?.getNextScenarios !== 'function') {
+        throw new Error('API client method getNextScenarios is not available.');
       }
+      const list = await api.getNextScenarios(15);
+      setScenarios(Array.isArray(list) ? list : []);
+      setCurrentIndex(0);
       setFeedback(null);
       setRevealData(null);
       setIsRevisionMode(false);
       setDecisionNote('');
+      setSelectedReasonCode('');
+      setDecisionError('');
       setScenarioStartTime(Date.now());
     } catch (err) {
       console.warn('Failed to load scenarios', err);
@@ -72,33 +137,19 @@ export default function ScenarioPracticeView({ currentUser }) {
     }
   };
 
-  const loadRules = async () => {
-    try {
-      const activeRule = await api.getCurrentRules?.();
-      if (activeRule) {
-        setStopLoss(activeRule.stop_loss_pct ?? 2.0);
-        setMaxTrades(activeRule.max_trades_per_day ?? 5);
-        setNoAveraging(activeRule.no_averaging_down ?? true);
-        setMaxPosition(activeRule.max_position_pct ?? 20.0);
-        setPracticeCapital(activeRule.practice_capital ?? 100000.0);
-      }
-    } catch (e) {
-      console.warn('Could not load scenario rules:', e);
-    }
-  };
-
   const loadDashboard = async () => {
     try {
       const data = await api.getDashboard();
       setDashboardData(data);
     } catch (err) {
-      console.warn('Could not load dashboard data:', err);
+      console.warn('Failed to load dashboard:', err);
     }
   };
 
   useEffect(() => {
-    loadScenarios();
     loadRules();
+    loadScenarios();
+    loadDataHealth();
   }, [currentUser]);
 
   useEffect(() => {
@@ -107,14 +158,86 @@ export default function ScenarioPracticeView({ currentUser }) {
     }
   }, [subTab]);
 
+  // Track decision time
+  useEffect(() => {
+    setScenarioStartTime(Date.now());
+  }, [currentIndex]);
+
+  // Load action-dependent reasons from single source of truth
+  useEffect(() => {
+    if (!selectedAction) return;
+    if (reasonsByAction[selectedAction]) return;
+    if (typeof api?.getReasons !== 'function') {
+      console.warn('api.getReasons is not available on api client');
+      return;
+    }
+    let cancelled = false;
+    setReasonsLoading(true);
+    api
+      .getReasons(selectedAction)
+      .then((res) => {
+        if (!cancelled && res?.reasons) {
+          setReasonsByAction((prev) => ({
+            ...prev,
+            [selectedAction]: res.reasons.slice(0, 8),
+          }));
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load reasons for action', selectedAction, err);
+      })
+      .finally(() => {
+        if (!cancelled) setReasonsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAction, reasonsByAction]);
+
+  const handleActionChange = (newAction) => {
+    if (newAction !== selectedAction) {
+      setSelectedAction(newAction);
+      setSelectedReasonCode(''); // Changing action clears previous reason
+      setDecisionError('');
+    }
+  };
+
+  const handleSaveRules = async (e) => {
+    e.preventDefault();
+    setRulesSuccessMessage('');
+    setRulesErrorMessage('');
+    try {
+      const saved = await api.setScenarioRules({
+        stop_loss_pct: parseFloat(stopLoss),
+        max_trades_per_day: parseInt(maxTrades, 10),
+        no_averaging_down: Boolean(noAveraging),
+        max_position_pct: parseFloat(maxPosition),
+        practice_capital: parseFloat(practiceCapital),
+      });
+      setHasRules(true);
+      setRulesSuccessMessage(`Rule Version ${saved.version} saved! Future decisions will be judged against these parameters.`);
+      await loadRules();
+    } catch (err) {
+      setRulesErrorMessage(err.message || 'Error saving rules');
+    }
+  };
+
   const handleSubmitDecision = async () => {
     const currentScenario = scenarios[currentIndex];
     if (!currentScenario) return;
 
+    if (!selectedReasonCode) {
+      setDecisionError('Please choose a reason for your decision before submitting.');
+      return;
+    }
+
     const seconds = Math.max(1.0, Math.round((Date.now() - scenarioStartTime) / 100) / 10);
     setDecisionSeconds(seconds);
+    setDecisionError('');
 
-    const fullReason = decisionNote.trim() ? `${decisionReason} - ${decisionNote.trim()}` : decisionReason;
+    const activeReasons = reasonsByAction[selectedAction] || [];
+    const selectedReasonObj = activeReasons.find((r) => r.code === selectedReasonCode);
+    const reasonLabel = selectedReasonObj?.label || selectedReasonCode;
 
     try {
       setLoading(true);
@@ -122,20 +245,24 @@ export default function ScenarioPracticeView({ currentUser }) {
         scenario_id: currentScenario.id,
         action: selectedAction,
         size: parseFloat(decisionSize),
-        reason: fullReason,
+        reason_code: selectedReasonCode,
+        reason: reasonLabel,
+        note: decisionNote.trim() || null,
         decision_seconds: seconds,
         chart_viewed: true,
         after_reveal: Boolean(revealData || isRevisionMode),
       });
 
       setFeedback(res);
+      // Track attempt in local history
       setPastAttempts((prev) => [
         {
           scenario_id: currentScenario.id,
           attempt_no: res.attempt_no,
           action: selectedAction,
           size: decisionSize,
-          reason: fullReason,
+          reason: reasonLabel,
+          reason_code: selectedReasonCode,
           label: res.pattern_feedback?.label,
           passed: res.rules_feedback?.passed,
           timestamp: new Date().toLocaleTimeString(),
@@ -144,7 +271,7 @@ export default function ScenarioPracticeView({ currentUser }) {
         ...prev,
       ]);
     } catch (err) {
-      alert(`Error submitting decision: ${err.message}`);
+      setDecisionError(err.message || 'Error submitting decision');
     } finally {
       setLoading(false);
     }
@@ -163,6 +290,8 @@ export default function ScenarioPracticeView({ currentUser }) {
 
   const handleChangeAnswer = () => {
     setFeedback(null);
+    setSelectedReasonCode('');
+    setDecisionError('');
     setIsRevisionMode(true);
   };
 
@@ -170,6 +299,8 @@ export default function ScenarioPracticeView({ currentUser }) {
     setFeedback(null);
     setRevealData(null);
     setIsRevisionMode(false);
+    setSelectedReasonCode('');
+    setDecisionError('');
     setDecisionNote('');
     if (currentIndex + 1 < scenarios.length) {
       setCurrentIndex(currentIndex + 1);
@@ -178,20 +309,27 @@ export default function ScenarioPracticeView({ currentUser }) {
     }
   };
 
-  const handleSaveRules = async (e) => {
-    e.preventDefault();
-    setRulesSuccessMessage('');
+  const handleReopenScenario = async (oldScenario) => {
+    setScenarios([oldScenario]);
+    setCurrentIndex(0);
+    setFeedback(null);
+    setRevealData(null);
+    setSelectedReasonCode('');
+    setDecisionError('');
+    setIsRevisionMode(true);
+    setSubTab('trainer');
     try {
-      const saved = await api.setRules({
-        stop_loss_pct: parseFloat(stopLoss),
-        max_trades_per_day: parseInt(maxTrades, 10),
-        no_averaging_down: Boolean(noAveraging),
-        max_position_pct: parseFloat(maxPosition),
-        practice_capital: parseFloat(practiceCapital),
-      });
-      setRulesSuccessMessage(`Rule Version ${saved?.version || 1} saved!`);
-    } catch (err) {
-      alert(`Error saving scenario rules: ${err.message}`);
+      const reveal = await api.getReveal(oldScenario.id);
+      setRevealData(reveal);
+    } catch {
+      // not yet revealed
+    }
+  };
+
+  const handleRestartSeason = async () => {
+    if (confirm(`Archive your current season and start fresh in Season ${(dashboardData?.season || 1) + 1}?`)) {
+      await api.restartProgress();
+      loadDashboard();
     }
   };
 
@@ -200,450 +338,588 @@ export default function ScenarioPracticeView({ currentUser }) {
   const isLoss = pnlPercent < 0;
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* Sub-Navigation Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11161F] border border-[#2A313C] p-2.5 rounded-xl shadow-sm">
-        <div className="flex items-center gap-1.5">
+    <div className="w-full space-y-6">
+      {/* Sub Navigation Bar for Scenarios */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-borderDefault pb-3 bg-bgSecondary/80 px-4 py-2.5 rounded-lg">
+        <div className="flex items-center space-x-2">
+          <Shield className="w-5 h-5 text-accentPrimary" />
+          <span className="font-extrabold text-sm sm:text-base text-textPrimary tracking-tight">Scenario Coach</span>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-bgTertiary text-textSecondary border border-borderDefault">
+            v2.0
+          </span>
+        </div>
+
+        <nav className="flex items-center space-x-1 sm:space-x-1.5">
           <button
+            type="button"
             onClick={() => setSubTab('trainer')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+            className={`px-3 py-1.5 text-xs sm:text-sm rounded font-medium transition-colors flex items-center space-x-1.5 ${
               subTab === 'trainer'
-                ? 'bg-[#1E3A5F] text-[#60A5FA] border border-[#3B82F6]/40'
-                : 'text-[#9CA3AF] hover:text-[#F9FAFB] hover:bg-[#1A1F29]'
+                ? 'bg-accentPrimary text-white shadow'
+                : 'text-textSecondary hover:text-textPrimary hover:bg-bgTertiary'
             }`}
           >
             <Play className="w-3.5 h-3.5" />
-            <span>Practice Trainer</span>
+            <span>Practice</span>
           </button>
-
           <button
-            onClick={() => setSubTab('dashboard')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
-              subTab === 'dashboard'
-                ? 'bg-[#1E3A5F] text-[#60A5FA] border border-[#3B82F6]/40'
-                : 'text-[#9CA3AF] hover:text-[#F9FAFB] hover:bg-[#1A1F29]'
-            }`}
-          >
-            <BarChart2 className="w-3.5 h-3.5" />
-            <span>Discipline Dashboard</span>
-          </button>
-
-          <button
-            onClick={() => setSubTab('history')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
-              subTab === 'history'
-                ? 'bg-[#1E3A5F] text-[#60A5FA] border border-[#3B82F6]/40'
-                : 'text-[#9CA3AF] hover:text-[#F9FAFB] hover:bg-[#1A1F29]'
-            }`}
-          >
-            <History className="w-3.5 h-3.5" />
-            <span>Decisions History ({pastAttempts.length})</span>
-          </button>
-
-          <button
+            type="button"
             onClick={() => setSubTab('rules')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+            className={`px-3 py-1.5 text-xs sm:text-sm rounded font-medium transition-colors flex items-center space-x-1.5 ${
               subTab === 'rules'
-                ? 'bg-[#1E3A5F] text-[#60A5FA] border border-[#3B82F6]/40'
-                : 'text-[#9CA3AF] hover:text-[#F9FAFB] hover:bg-[#1A1F29]'
+                ? 'bg-accentPrimary text-white shadow'
+                : 'text-textSecondary hover:text-textPrimary hover:bg-bgTertiary'
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Scenario Guardrails</span>
+            <span>My Rules</span>
           </button>
-        </div>
-
-        {subTab === 'trainer' && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-[#9CA3AF] font-mono">
-              Scenario {scenarios.length > 0 ? currentIndex + 1 : 0} of {scenarios.length}
-            </span>
-            <button
-              onClick={loadScenarios}
-              disabled={loading}
-              title="Refresh Scenario Pool"
-              className="p-1.5 rounded bg-[#1A1F29] border border-[#2A313C] text-[#D1D5DB] hover:text-white"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-        )}
+          <button
+            type="button"
+            onClick={() => {
+              setSubTab('dashboard');
+              loadDashboard();
+            }}
+            className={`px-3 py-1.5 text-xs sm:text-sm rounded font-medium transition-colors flex items-center space-x-1.5 ${
+              subTab === 'dashboard'
+                ? 'bg-accentPrimary text-white shadow'
+                : 'text-textSecondary hover:text-textPrimary hover:bg-bgTertiary'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5" />
+            <span>Discipline Dashboard</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('history')}
+            className={`px-3 py-1.5 text-xs sm:text-sm rounded font-medium transition-colors flex items-center space-x-1.5 ${
+              subTab === 'history'
+                ? 'bg-accentPrimary text-white shadow'
+                : 'text-textSecondary hover:text-textPrimary hover:bg-bgTertiary'
+            }`}
+            title="Session Attempt History"
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>History ({pastAttempts.length})</span>
+          </button>
+        </nav>
       </div>
 
       {/* Main Tab Content */}
-      {subTab === 'trainer' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Chart & Market Situation (8 cols) */}
-          <div className="lg:col-span-8 space-y-4">
-            <div className="bg-[#11161F] border border-[#2A313C] rounded-xl p-4 shadow-md space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#2A313C] pb-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-[#1E3A5F] flex items-center justify-center text-[#60A5FA]">
-                    <Shield className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[#F9FAFB] flex items-center gap-2">
-                      <span>Live Behavioral Scenario</span>
-                      {isRevisionMode && (
-                        <span className="text-[10px] uppercase font-semibold bg-[#3B82F6]/20 text-[#60A5FA] px-2 py-0.5 rounded border border-[#3B82F6]/30">
-                          Revision Mode
-                        </span>
-                      )}
-                    </h3>
-                    <p className="text-xs text-[#9CA3AF]">
-                      Blind replay test — Symbol & timestamp masked to neutralize hindsight bias
-                    </p>
-                  </div>
-                </div>
-
-                {currentScenario && (
-                  <div className="flex items-center gap-3">
-                    <div className="text-right">
-                      <div className="text-xs text-[#9CA3AF]">Drawdown from Entry</div>
-                      <div
-                        className={`text-sm font-bold font-mono flex items-center justify-end gap-1 ${
-                          isLoss ? 'text-[#F87171]' : 'text-[#34D399]'
-                        }`}
-                      >
-                        {isLoss ? (
-                          <ArrowDownRight className="w-4 h-4 text-[#F87171]" />
-                        ) : (
-                          <ArrowUpRight className="w-4 h-4 text-[#34D399]" />
-                        )}
-                        <span>{pnlPercent.toFixed(2)}%</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Chart Component */}
-              {currentScenario ? (
-                <div className="h-[340px] w-full rounded-lg overflow-hidden border border-[#2A313C] bg-[#1A1F29]">
-                  <CandleChart
-                    candles={currentScenario.candles || []}
-                    outcomeCandles={revealData?.outcome_candles || null}
-                    decisionPrice={currentScenario.current_price}
-                    isRevealed={Boolean(revealData)}
-                    height={340}
-                  />
-                </div>
-              ) : (
-                <div className="h-[340px] flex flex-col items-center justify-center text-[#9CA3AF] border border-[#2A313C] rounded-lg p-6 space-y-3">
-                  {loading ? (
-                    <div className="flex items-center space-x-2 text-sm text-[#60A5FA]">
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Loading scenario simulation data...</span>
-                    </div>
-                  ) : loadError ? (
-                    <div className="text-center space-y-2">
-                      <p className="text-xs text-[#F87171]">{loadError}</p>
-                      <button
-                        type="button"
-                        onClick={loadScenarios}
-                        className="px-3 py-1.5 rounded bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold"
-                      >
-                        Retry Loading
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="text-center space-y-2">
-                      <p className="text-xs text-[#9CA3AF]">No unseen scenarios available in your practice pool.</p>
-                      <button
-                        type="button"
-                        onClick={loadScenarios}
-                        className="px-3 py-1.5 rounded bg-[#1A1F29] hover:bg-[#2A313C] text-[#F9FAFB] text-xs font-semibold border border-[#2A313C]"
-                      >
-                        Reset / Refresh Scenarios
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Outcome Reveal Panel (Appears after submission or button click) */}
-            {revealData && (
-              <RevealPanel
-                revealData={revealData}
-                onNextScenario={handleNextScenario}
-                onChangeAnswer={handleChangeAnswer}
-              />
-            )}
-          </div>
-
-          {/* Decision Panel & Behavioral Feedback (4 cols) */}
-          <div className="lg:col-span-4 space-y-4">
-            {/* Action Box */}
-            <div className="bg-[#11161F] border border-[#2A313C] rounded-xl p-4 shadow-md space-y-4">
-              <h4 className="text-xs font-bold text-[#F9FAFB] uppercase tracking-wider">
-                What is your trading decision?
-              </h4>
-
-              {/* Action Buttons */}
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedAction('buy')}
-                  disabled={Boolean(feedback && !isRevisionMode)}
-                  className={`py-2 rounded-lg text-xs font-bold tracking-wide uppercase transition-all ${
-                    selectedAction === 'buy'
-                      ? 'bg-[#34D399] text-[#064E3B] ring-2 ring-[#34D399]/50 shadow-md'
-                      : 'bg-[#1A1F29] text-[#D1D5DB] border border-[#2A313C] hover:border-[#374151]'
-                  }`}
-                >
-                  Buy More
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSelectedAction('hold')}
-                  disabled={Boolean(feedback && !isRevisionMode)}
-                  className={`py-2 rounded-lg text-xs font-bold tracking-wide uppercase transition-all ${
-                    selectedAction === 'hold'
-                      ? 'bg-[#3B82F6] text-white ring-2 ring-[#3B82F6]/50 shadow-md'
-                      : 'bg-[#1A1F29] text-[#D1D5DB] border border-[#2A313C] hover:border-[#374151]'
-                  }`}
-                >
-                  Hold Position
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSelectedAction('sell')}
-                  disabled={Boolean(feedback && !isRevisionMode)}
-                  className={`py-2 rounded-lg text-xs font-bold tracking-wide uppercase transition-all ${
-                    selectedAction === 'sell'
-                      ? 'bg-[#EF4444] text-white ring-2 ring-[#EF4444]/50 shadow-md'
-                      : 'bg-[#1A1F29] text-[#D1D5DB] border border-[#2A313C] hover:border-[#374151]'
-                  }`}
-                >
-                  Cut / Exit
-                </button>
-              </div>
-
-              {/* Allocation Size */}
-              <div className="space-y-1.5">
-                <label className="text-xs text-[#9CA3AF] flex justify-between">
-                  <span>Allocation Size</span>
-                  <span className="font-mono text-[#F9FAFB]">₹{Number(decisionSize).toLocaleString('en-IN')}</span>
-                </label>
-                <input
-                  type="number"
-                  min="1000"
-                  max="100000"
-                  step="1000"
-                  value={decisionSize}
-                  onChange={(e) => setDecisionSize(e.target.value)}
-                  disabled={Boolean(feedback && !isRevisionMode)}
-                  className="w-full bg-[#1A1F29] border border-[#2A313C] rounded-lg px-3 py-1.5 text-xs text-[#F9FAFB] focus:border-[#3B82F6] outline-none"
-                />
-              </div>
-
-              {/* Mental State / Reason */}
-              <div className="space-y-1.5">
-                <label className="text-xs text-[#9CA3AF]">Psychological Trigger / Reason</label>
-                <select
-                  value={decisionReason}
-                  onChange={(e) => setDecisionReason(e.target.value)}
-                  disabled={Boolean(feedback && !isRevisionMode)}
-                  className="w-full bg-[#1A1F29] border border-[#2A313C] rounded-lg px-3 py-1.5 text-xs text-[#F9FAFB] focus:border-[#3B82F6] outline-none"
-                >
-                  <option value="Followed my rule">Followed my defined rule</option>
-                  <option value="Fear of further loss">Fear of further drawdown</option>
-                  <option value="FOMO / Rebound hope">FOMO / Hoping for quick rebound</option>
-                  <option value="Averaging down discount">Averaging down for lower cost</option>
-                  <option value="Recover yesterday loss">Attempting to recover earlier loss</option>
-                  <option value="Gut instinct">Gut instinct</option>
-                </select>
-              </div>
-
-              {/* Submit Decision */}
-              {!feedback || isRevisionMode ? (
-                <button
-                  type="button"
-                  onClick={handleSubmitDecision}
-                  disabled={loading || !currentScenario}
-                  className="w-full py-2.5 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-bold transition-all shadow-md disabled:opacity-50"
-                >
-                  {loading ? 'Evaluating Model...' : 'Lock In Decision & Get Feedback'}
-                </button>
-              ) : (
-                <div className="flex gap-2">
-                  {!revealData && (
-                    <button
-                      type="button"
-                      onClick={handleReveal}
-                      className="flex-1 py-2 rounded-lg bg-[#1E3A5F] hover:bg-[#3B82F6] text-[#60A5FA] hover:text-white text-xs font-bold transition-all border border-[#3B82F6]/30"
-                    >
-                      Reveal Market Outcome
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleNextScenario}
-                    className="flex-1 py-2 rounded-lg bg-[#34D399] hover:bg-[#10B981] text-[#064E3B] text-xs font-bold transition-all shadow-md"
-                  >
-                    Next Scenario →
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Three-part Behavioral Feedback Card */}
-            {feedback && (
-              <FeedbackCard
-                feedback={feedback}
-                attemptId={feedback.attempt_id}
-              />
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Dashboard Sub-Tab */}
-      {subTab === 'dashboard' && (
-        <div className="bg-[#11161F] border border-[#2A313C] rounded-xl p-6 shadow-md">
-          <Dashboard
-            data={dashboardData}
-            onRestartSeason={() => {
-              api.restartProgress().then(() => loadDashboard());
-            }}
-            onStartPracticing={() => setSubTab('trainer')}
-          />
-        </div>
-      )}
-
-      {/* History Sub-Tab */}
-      {subTab === 'history' && (
-        <div className="bg-[#11161F] border border-[#2A313C] rounded-xl p-5 shadow-md space-y-4">
-          <div className="flex items-center justify-between border-b border-[#2A313C] pb-3">
-            <h3 className="text-sm font-bold text-[#F9FAFB]">Scenario Decision Log</h3>
-            <span className="text-xs text-[#9CA3AF] font-mono">{pastAttempts.length} decisions recorded</span>
-          </div>
-
-          {pastAttempts.length === 0 ? (
-            <div className="text-center py-10 text-xs text-[#9CA3AF]">
-              No attempts recorded in this session yet. Complete scenarios in the trainer to track your decisions.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-[#2A313C] text-[#9CA3AF]">
-                    <th className="py-2 px-3">Time</th>
-                    <th className="py-2 px-3">Action</th>
-                    <th className="py-2 px-3">Size</th>
-                    <th className="py-2 px-3">Reason</th>
-                    <th className="py-2 px-3">AI Pattern</th>
-                    <th className="py-2 px-3">Rule Result</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#2A313C]">
-                  {pastAttempts.map((item, idx) => (
-                    <tr key={idx} className="hover:bg-[#1A1F29]/50 transition-colors">
-                      <td className="py-2.5 px-3 font-mono text-[#9CA3AF]">{item.timestamp}</td>
-                      <td className="py-2.5 px-3 uppercase font-bold text-[#F9FAFB]">{item.action}</td>
-                      <td className="py-2.5 px-3 font-mono">₹{Number(item.size).toLocaleString('en-IN')}</td>
-                      <td className="py-2.5 px-3 text-[#D1D5DB]">{item.reason}</td>
-                      <td className="py-2.5 px-3">
-                        <span className="px-2 py-0.5 rounded text-[11px] font-semibold uppercase bg-[#1E3A5F] text-[#60A5FA]">
-                          {item.label || 'disciplined'}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3">
-                        <span className={`font-semibold ${item.passed ? 'text-[#34D399]' : 'text-[#F87171]'}`}>
-                          {item.passed ? 'Passed' : 'Violated'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Rules Sub-Tab */}
-      {subTab === 'rules' && (
-        <div className="bg-[#11161F] border border-[#2A313C] rounded-xl p-6 shadow-md max-w-2xl mx-auto space-y-4">
-          <div className="flex items-center gap-3 border-b border-[#2A313C] pb-3">
-            <Sliders className="w-5 h-5 text-[#60A5FA]" />
-            <div>
-              <h3 className="text-sm font-bold text-[#F9FAFB]">Simulation Guardrails & Risk Settings</h3>
-              <p className="text-xs text-[#9CA3AF]">Personal behavioral rules tested during practice scenarios</p>
-            </div>
+      {subTab === 'rules' ? (
+        /* Rules Configuration View */
+        <div className="bg-bgSecondary border border-borderDefault rounded-lg p-4 sm:p-6 max-w-2xl mx-auto shadow-sm space-y-5">
+          <div>
+            <h2 className="text-xl font-bold flex items-center space-x-2 text-textPrimary">
+              <Shield className="w-5 h-5 text-accentPrimary" />
+              <span>Personal Trading Rules (Scenario Simulation)</span>
+            </h2>
+            <p className="text-xs sm:text-sm text-textSecondary mt-1">
+              Your discipline rules determine what counts as a mistake. Edited rules create a new version so older decisions are judged by the rules that applied then.
+            </p>
           </div>
 
           {rulesSuccessMessage && (
-            <div className="p-3 rounded-lg bg-[#064E3B]/40 border border-[#059669]/50 text-xs text-[#34D399] flex items-center gap-2">
-              <CheckCircle className="w-4 h-4 shrink-0" />
-              <span>{rulesSuccessMessage}</span>
+            <div className="p-3 rounded bg-successBg border border-success text-success text-xs flex items-center justify-between">
+              <span>✓ {rulesSuccessMessage}</span>
+              <button type="button" onClick={() => setRulesSuccessMessage('')}>✕</button>
             </div>
           )}
 
-          <form onSubmit={handleSaveRules} className="space-y-4 text-xs">
-            <div className="space-y-1">
-              <label className="text-[#9CA3AF]">Hard Stop-Loss Cutoff (% per trade)</label>
+          {rulesErrorMessage && (
+            <div className="p-3 rounded bg-warningBg border border-warning text-warning text-xs flex items-center justify-between">
+              <span>{rulesErrorMessage}</span>
+              <button type="button" onClick={() => setRulesErrorMessage('')}>✕</button>
+            </div>
+          )}
+
+          <form onSubmit={handleSaveRules} className="space-y-4">
+            <div>
+              <label className="block text-xs uppercase tracking-wider font-semibold text-textSecondary mb-1">
+                Stop-Loss Threshold (% per trade)
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                required
+                value={stopLoss}
+                onChange={(e) => setStopLoss(e.target.value)}
+                className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs uppercase tracking-wider font-semibold text-textSecondary mb-1">
+                Daily Trade Limit (Max trades per session)
+              </label>
+              <input
+                type="number"
+                required
+                min={1}
+                value={maxTrades}
+                onChange={(e) => setMaxTrades(e.target.value)}
+                className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+              />
+            </div>
+
+            <div className="flex items-center space-x-3 py-1">
+              <input
+                type="checkbox"
+                id="noAveragingScn"
+                checked={noAveraging}
+                onChange={(e) => setNoAveraging(e.target.checked)}
+                className="w-5 h-5 text-accentPrimary rounded bg-bgTertiary border-borderDefault focus:ring-0"
+              />
+              <label htmlFor="noAveragingScn" className="text-xs sm:text-sm font-medium text-textPrimary cursor-pointer">
+                Strictly forbid averaging down (Never buy more when trade is in loss)
+              </label>
+            </div>
+
+            <div>
+              <label className="block text-xs uppercase tracking-wider font-semibold text-textSecondary mb-1">
+                Max Position Allocation (% of Practice Capital)
+              </label>
               <input
                 type="number"
                 step="0.5"
-                min="0.5"
-                max="10"
-                value={stopLoss}
-                onChange={(e) => setStopLoss(e.target.value)}
-                className="w-full bg-[#1A1F29] border border-[#2A313C] rounded-lg px-3 py-2 text-[#F9FAFB] outline-none focus:border-[#3B82F6]"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[#9CA3AF]">Max Trades Per Day Limit</label>
-              <input
-                type="number"
-                min="1"
-                max="20"
-                value={maxTrades}
-                onChange={(e) => setMaxTrades(e.target.value)}
-                className="w-full bg-[#1A1F29] border border-[#2A313C] rounded-lg px-3 py-2 text-[#F9FAFB] outline-none focus:border-[#3B82F6]"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[#9CA3AF]">Max Position Exposure (% of capital)</label>
-              <input
-                type="number"
-                step="5"
-                min="5"
-                max="100"
+                required
+                min={1}
+                max={100}
                 value={maxPosition}
                 onChange={(e) => setMaxPosition(e.target.value)}
-                className="w-full bg-[#1A1F29] border border-[#2A313C] rounded-lg px-3 py-2 text-[#F9FAFB] outline-none focus:border-[#3B82F6]"
+                className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
               />
             </div>
 
-            <div className="flex items-center gap-2 pt-2">
-              <input
-                type="checkbox"
-                id="noAveraging"
-                checked={noAveraging}
-                onChange={(e) => setNoAveraging(e.target.checked)}
-                className="rounded border-[#2A313C] bg-[#1A1F29] text-[#3B82F6] focus:ring-0"
-              />
-              <label htmlFor="noAveraging" className="text-[#D1D5DB]">
-                Enforce Strict Rule: No averaging down into losing positions
+            <div>
+              <label className="block text-xs uppercase tracking-wider font-semibold text-textSecondary mb-1">
+                Practice Capital (₹) - Custom user capital for scenario sizing
               </label>
+              <input
+                type="number"
+                step="5000"
+                required
+                min={1000}
+                value={practiceCapital}
+                onChange={(e) => setPracticeCapital(e.target.value)}
+                className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+              />
             </div>
 
             <button
               type="submit"
-              className="w-full py-2.5 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-bold transition-all shadow-md"
+              className="w-full bg-accentPrimary hover:bg-accentHover text-white py-3 rounded font-bold text-sm tracking-wide transition-colors min-h-[44px] shadow"
             >
-              Save Simulation Guardrails
+              Save & Update Rule Version
             </button>
           </form>
+
+          {/* Version History */}
+          {ruleHistory.length > 0 && (
+            <div className="pt-4 border-t border-borderDefault">
+              <span className="text-xs uppercase font-bold text-textSecondary block mb-2">
+                Rule Version History ({ruleHistory.length})
+              </span>
+              <div className="space-y-2">
+                {ruleHistory.map((r) => (
+                  <div key={r.id} className="text-xs bg-bgTertiary p-2.5 rounded border border-borderDefault flex items-center justify-between">
+                    <span className="font-mono font-bold text-accentPrimary">v{r.version}</span>
+                    <span>Stop: {r.stop_loss_pct}%</span>
+                    <span>Limit: {r.max_trades_per_day}/day</span>
+                    <span>Cap: {r.max_position_pct}%</span>
+                    <span className={r.is_current ? 'text-success font-bold' : 'text-textTertiary'}>
+                      {r.is_current ? 'Active' : 'Archived'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Market Data Status in Settings */}
+          <div className="pt-4 border-t border-borderDefault">
+            <span className="text-xs uppercase font-bold text-textSecondary block mb-2">
+              Market Data Status
+            </span>
+            {dataHealth ? (
+              <div
+                className={`text-xs p-3 rounded border flex flex-wrap items-center justify-between gap-2 ${
+                  dataHealth.is_stale || dataHealth.status !== 'ok'
+                    ? 'bg-warningBg/20 border-warning/40 text-warning'
+                    : 'bg-bgTertiary border-borderDefault text-textSecondary'
+                }`}
+              >
+                <div>
+                  <span className="font-semibold text-textPrimary mr-1.5">
+                    Scenario pool {dataHealth.is_stale ? 'stale' : 'updated'}{' '}
+                    {dataHealth.pool_date_window?.end ? formatPoolDate(dataHealth.pool_date_window.end) : ''}
+                  </span>
+                  <span className="text-textTertiary">
+                    ({dataHealth.total_active_scenarios || 0} scenarios)
+                  </span>
+                </div>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    dataHealth.status === 'ok' && !dataHealth.is_stale
+                      ? 'bg-successBg text-success border border-success/30'
+                      : 'bg-warningBg text-warning border border-warning/30'
+                  }`}
+                >
+                  {dataHealth.status === 'ok' && !dataHealth.is_stale ? 'Connected' : 'Stale Pool'}
+                </span>
+              </div>
+            ) : (
+              <div className="text-xs text-textTertiary">Loading market data status...</div>
+            )}
+          </div>
+        </div>
+      ) : subTab === 'dashboard' ? (
+        /* Discipline Dashboard View */
+        <Dashboard
+          data={dashboardData}
+          onRestartSeason={handleRestartSeason}
+          onStartPracticing={() => setSubTab('trainer')}
+        />
+      ) : subTab === 'history' ? (
+        /* History View */
+        <div className="bg-bgSecondary border border-borderDefault rounded-lg p-4 sm:p-6 max-w-3xl mx-auto space-y-4">
+          <div className="flex items-center justify-between border-b border-borderDefault pb-3">
+            <h2 className="text-lg font-bold flex items-center space-x-2 text-textPrimary">
+              <History className="w-5 h-5 text-accentPrimary" />
+              <span>Scenario Practice History</span>
+            </h2>
+            <span className="text-xs text-textTertiary">{pastAttempts.length} attempted sessions</span>
+          </div>
+
+          {pastAttempts.length === 0 ? (
+            <div className="text-center py-8 text-xs text-textSecondary">
+              No past scenario attempts recorded in this session yet.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {pastAttempts.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="p-3 rounded bg-bgTertiary border border-borderDefault flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div>
+                    <span className="font-mono font-bold text-accentPrimary mr-2">Scenario #{item.scenario_id}</span>
+                    <span className="capitalize font-semibold text-textPrimary mr-2">
+                      {item.action === 'buy' ? '+ Buy' : item.action === 'sell' ? '- Sell' : '= Hold'} (₹{item.size.toLocaleString()})
+                    </span>
+                    <span className="text-textTertiary">Attempt #{item.attempt_no}</span>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <span className={`px-2 py-0.5 rounded font-bold uppercase ${
+                      item.passed ? 'bg-successBg text-success' : 'bg-warningBg text-warning'
+                    }`}>
+                      {item.passed ? 'Passed Rules' : 'Rule Break'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleReopenScenario(item.scenario)}
+                      className="px-2.5 py-1 bg-accentPrimary hover:bg-accentHover text-white rounded font-medium min-h-[36px]"
+                    >
+                      Reopen (Attempt {item.attempt_no + 1})
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Practice Trainer View */
+        <div className="space-y-5">
+          {loading && !currentScenario ? (
+            <div className="text-center py-12 text-textSecondary flex items-center justify-center space-x-2">
+              <RefreshCw className="w-4 h-4 animate-spin text-accentPrimary" />
+              <span>Loading active market scenario...</span>
+            </div>
+          ) : !currentScenario ? (
+            <div className="bg-bgSecondary border border-borderDefault p-8 rounded-lg text-center space-y-4 max-w-lg mx-auto shadow-sm">
+              {loadError ? (
+                <>
+                  <div className="w-12 h-12 rounded-full bg-warningBg text-warning flex items-center justify-center mx-auto border border-warning/30">
+                    <AlertTriangle className="w-6 h-6" />
+                  </div>
+                  <h3 className="text-base font-bold text-textPrimary">Cannot Load Scenarios</h3>
+                  <p className="text-xs text-textSecondary leading-relaxed">{loadError}</p>
+                </>
+              ) : (
+                <>
+                  <div className="w-12 h-12 rounded-full bg-bgTertiary text-accentPrimary flex items-center justify-center mx-auto border border-borderDefault">
+                    <CheckCircle className="w-6 h-6 text-success" />
+                  </div>
+                  <h3 className="text-base font-bold text-textPrimary">Scenarios Completed</h3>
+                  <p className="text-xs text-textSecondary leading-relaxed">
+                    You have practiced the active unseen scenarios in this batch. Click below to shuffle and practice again!
+                  </p>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={loadScenarios}
+                className="bg-accentPrimary hover:bg-accentHover text-white px-5 py-2.5 rounded font-semibold text-sm transition-colors min-h-[44px] shadow"
+              >
+                {loadError ? 'Retry Loading Scenarios' : 'Reload & Practice Again'}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Scenario Meta Header: Symbol & Date Strictly Hidden */}
+              <div className="bg-bgSecondary border border-borderDefault p-3.5 sm:p-4 rounded-lg flex flex-wrap items-center justify-between gap-3 shadow-sm">
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-mono px-2 py-0.5 rounded bg-bgTertiary text-accentPrimary border border-borderDefault font-bold">
+                      Practice Setup #{currentScenario.id}
+                    </span>
+                    {isRevisionMode && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-warningBg text-warning font-bold border border-warning/30">
+                        Revision Attempt
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-textSecondary mt-1 flex items-center space-x-3">
+                    <span>Event Type: <strong className="text-textPrimary capitalize">{currentScenario.event_type}</strong></span>
+                    <span>•</span>
+                    <span>Trades Today: <strong className="text-textPrimary">{currentScenario.trades_today || 1}</strong></span>
+                  </div>
+                </div>
+
+                {/* Position & PnL Status */}
+                <div className="flex items-center space-x-4 text-xs sm:text-sm">
+                  <div className="text-right">
+                    <span className="text-[10px] text-textTertiary block uppercase">Current Price</span>
+                    <span className="font-mono font-bold text-textPrimary">₹{currentScenario.current_price?.toFixed(2)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-textTertiary block uppercase">Position Move</span>
+                    <div className={`font-mono font-extrabold flex items-center justify-end space-x-0.5 ${
+                      pnlPercent >= 0 ? 'text-gain' : 'text-loss'
+                    }`}>
+                      {pnlPercent >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+                      <span>{pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Interactive Candlestick Chart */}
+              <CandleChart
+                candles={currentScenario.candles || []}
+                outcomeCandles={revealData?.outcome_candles || null}
+                decisionPrice={currentScenario.current_price}
+                isRevealed={Boolean(revealData)}
+                height={340}
+              />
+
+              {/* Decision Form or Feedback / Reveal View */}
+              {!feedback ? (
+                <div className="bg-bgSecondary border border-borderDefault p-4 sm:p-6 rounded-lg space-y-4 shadow-sm">
+                  {/* Action Selector: Touch friendly 44px+ targets */}
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-textSecondary mb-2 font-bold">
+                      1. Select Order Action
+                    </label>
+                    <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                      <button
+                        type="button"
+                        onClick={() => handleActionChange('buy')}
+                        className={`py-3 px-3 rounded-lg text-xs sm:text-sm font-extrabold flex items-center justify-center space-x-1.5 transition-all min-h-[48px] ${
+                          selectedAction === 'buy'
+                            ? 'bg-gain text-black shadow-lg ring-2 ring-gain/50'
+                            : 'bg-bgTertiary text-textSecondary hover:text-textPrimary border border-borderDefault'
+                        }`}
+                      >
+                        <Plus className="w-4 h-4 stroke-[3]" />
+                        <span>Buy</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleActionChange('sell')}
+                        className={`py-3 px-3 rounded-lg text-xs sm:text-sm font-extrabold flex items-center justify-center space-x-1.5 transition-all min-h-[48px] ${
+                          selectedAction === 'sell'
+                            ? 'bg-loss text-white shadow-lg ring-2 ring-loss/50'
+                            : 'bg-bgTertiary text-textSecondary hover:text-textPrimary border border-borderDefault'
+                        }`}
+                      >
+                        <Minus className="w-4 h-4 stroke-[3]" />
+                        <span>Sell</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleActionChange('hold')}
+                        className={`py-3 px-3 rounded-lg text-xs sm:text-sm font-extrabold flex items-center justify-center space-x-1.5 transition-all min-h-[48px] ${
+                          selectedAction === 'hold'
+                            ? 'bg-accentPrimary text-white shadow-lg ring-2 ring-accentPrimary/50'
+                            : 'bg-bgTertiary text-textSecondary hover:text-textPrimary border border-borderDefault'
+                        }`}
+                      >
+                        <Equal className="w-4 h-4 stroke-[3]" />
+                        <span>Hold</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Position Sizing */}
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                      2. Position Size (₹)
+                    </label>
+                    <input
+                      type="number"
+                      step="1000"
+                      value={decisionSize}
+                      onChange={(e) => setDecisionSize(e.target.value)}
+                      className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+                    />
+                    <span className="text-[11px] text-textTertiary mt-1 block">
+                      Rule limit: {maxPosition}% (₹{Math.round(practiceCapital * (maxPosition / 100)).toLocaleString()})
+                    </span>
+                  </div>
+
+                  {/* Action-Dependent Touch-Friendly Reason Chips (max 8) */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-xs uppercase tracking-wider text-textSecondary font-bold">
+                        3. Reason for <span className="text-accentPrimary">{selectedAction.toUpperCase()}</span> Decision
+                      </label>
+                      {!selectedReasonCode && (
+                        <span className="text-[11px] text-textTertiary">Select one chip</span>
+                      )}
+                    </div>
+
+                    {reasonsLoading && !(reasonsByAction[selectedAction]?.length) ? (
+                      <div className="text-xs text-textTertiary py-3">Loading reasons for {selectedAction}...</div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {(reasonsByAction[selectedAction] || []).slice(0, 8).map((r) => {
+                          const isSelected = selectedReasonCode === r.code;
+                          return (
+                            <button
+                              key={r.code}
+                              type="button"
+                              aria-pressed={isSelected}
+                              onClick={() => {
+                                setSelectedReasonCode(r.code);
+                                setDecisionError('');
+                              }}
+                              className={`min-h-[44px] px-3 py-2.5 rounded-lg text-left text-xs sm:text-sm font-medium transition-all flex items-center justify-between gap-2 border ${
+                                isSelected
+                                  ? 'bg-accentPrimary/20 border-accentPrimary text-textPrimary ring-2 ring-accentPrimary/40 shadow-sm'
+                                  : 'bg-bgTertiary border-borderDefault text-textSecondary hover:text-textPrimary hover:border-borderStrong'
+                              }`}
+                            >
+                              <span>{r.label}</span>
+                              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-bgSecondary text-textTertiary border border-borderDefault shrink-0">
+                                {r.kind}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {decisionError && (
+                    <div className="p-3 rounded bg-warningBg/40 border border-warning text-warning text-xs flex items-center justify-between">
+                      <span>{decisionError}</span>
+                      <button type="button" onClick={() => setDecisionError('')} className="font-bold ml-2">✕</button>
+                    </div>
+                  )}
+
+                  {/* Optional Note */}
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                      4. Optional Trade Note
+                    </label>
+                    <input
+                      type="text"
+                      value={decisionNote}
+                      onChange={(e) => setDecisionNote(e.target.value)}
+                      placeholder="e.g. Price broke below support, waiting for retest"
+                      className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2 text-textPrimary focus:border-accentPrimary focus:outline-none text-xs sm:text-sm min-h-[40px]"
+                    />
+                  </div>
+
+                  {/* Decision Action Button */}
+                  <button
+                    type="button"
+                    onClick={handleSubmitDecision}
+                    disabled={loading}
+                    className="w-full bg-accentPrimary hover:bg-accentHover text-white py-3 px-4 rounded-lg font-bold text-sm tracking-wide transition-all min-h-[48px] shadow-lg flex items-center justify-center space-x-2"
+                  >
+                    {loading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Evaluating Rules & Behavior...</span>
+                      </>
+                    ) : (
+                      <span>Submit Decision & Reveal Coaching Feedback</span>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                /* Post-Decision View: Feedback Card + Reveal Flow */
+                <div className="space-y-4">
+                  {/* 3-Part Feedback Card */}
+                  <FeedbackCard
+                    feedback={feedback}
+                    attemptId={feedback.attempt_id}
+                  />
+
+                  {/* Reveal Gate / Section */}
+                  {!revealData ? (
+                    <div className="bg-bgSecondary border border-borderDefault p-4 rounded-lg flex flex-col sm:flex-row gap-2.5 shadow-sm">
+                      <button
+                        type="button"
+                        onClick={handleChangeAnswer}
+                        className="flex-1 bg-bgTertiary hover:bg-bgTertiary/80 border border-borderDefault text-textSecondary hover:text-textPrimary py-3 px-4 rounded-lg text-xs sm:text-sm font-semibold transition-colors min-h-[48px]"
+                      >
+                        Change Your Answer ("What would you do now?")
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleReveal}
+                        className="flex-1 bg-accentPrimary hover:bg-accentHover text-white py-3 px-4 rounded-lg text-xs sm:text-sm font-bold transition-all shadow min-h-[48px]"
+                      >
+                        Reveal Market Outcome (2, 5, 10, 30 min)
+                      </button>
+                    </div>
+                  ) : (
+                    /* Revealed Multi-Horizon Panel */
+                    <RevealPanel
+                      revealData={revealData}
+                      onNextScenario={handleNextScenario}
+                      onChangeAnswer={handleChangeAnswer}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
+
+      {/* Small quiet data status line */}
+      <footer className="border-t border-borderDefault bg-bgSecondary/60 py-2.5 px-4 text-center rounded-lg mt-6">
+        {dataHealth ? (
+          <div className="inline-flex items-center space-x-2 text-[11px]">
+            {dataHealth.is_stale || dataHealth.status !== 'ok' ? (
+              <span className="text-warning bg-warningBg/30 border border-warning/40 px-2.5 py-0.5 rounded font-medium">
+                Scenario pool stale (updated {formatPoolDate(dataHealth.pool_date_window?.end)}; {dataHealth.total_active_scenarios || 0} scenarios)
+              </span>
+            ) : (
+              <span className="text-textTertiary">
+                Scenario pool updated {formatPoolDate(dataHealth.pool_date_window?.end)}; {dataHealth.total_active_scenarios || 0} scenarios
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-[11px] text-textTertiary">TradeZen Scenario Coach v2.0</span>
+        )}
+      </footer>
     </div>
   );
 }

@@ -44,6 +44,15 @@ def get_next_scenarios(
         .all()
     )
 
+    if not unseen_scenarios:
+        unseen_scenarios = (
+            db.query(Scenario)
+            .filter(Scenario.active.is_(True))
+            .order_by(func.random())
+            .limit(effective_limit)
+            .all()
+        )
+
     return unseen_scenarios
 
 

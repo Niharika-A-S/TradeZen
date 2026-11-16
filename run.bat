@@ -81,7 +81,7 @@ if not errorlevel 1 (
 
 :: 5. Launch FastAPI Backend in a new window
 echo [2/3] Launching FastAPI Backend on http://localhost:8000...
-start "TradeZen Backend (Port 8000)" powershell -NoExit -Command "cd '%~dp0'; & %UVICORN_CMD% app.api.main:app --host 127.0.0.1 --port 8000 --reload"
+start "TradeZen Backend (Port 8000)" powershell -NoExit -Command "cd '%~dp0'; & %UVICORN_CMD% app.api.main:app --host 127.0.0.1 --port 8000 --workers 1 --reload"
 
 :: 6. Launch React Frontend in a new window
 echo [3/3] Launching React Frontend on http://localhost:5173...

@@ -24,6 +24,7 @@ export default function App() {
   const [isLoadingClock, setIsLoadingClock] = useState(false);
   const [currentPrice, setCurrentPrice] = useState(null);
   const [bars, setBars] = useState([]);
+  const [livePrices, setLivePrices] = useState({});
 
   const [account, setAccount] = useState(null);
   const [positions, setPositions] = useState([]);
@@ -103,11 +104,49 @@ export default function App() {
   // Refresh market data for selected symbol & time
   const refreshMarketData = useCallback(async (sym = selectedSymbol, clock = clockStatus) => {
     try {
-      // 1. Fetch current price
+      if (clock?.mode === 'LIVE') {
+        // In LIVE mode: candles come from GET /live/candles
+        try {
+          const candleData = await api.getLiveCandles(sym, 300);
+          if (candleData?.candles) {
+            const mappedBars = candleData.candles.map((c) => ({
+              ...c,
+              timestamp: c.time ? c.time.replace('T', ' ').slice(0, 19) : '',
+            }));
+            setBars(mappedBars);
+          } else {
+            setBars([]);
+          }
+        } catch (candleErr) {
+          console.warn('Live candles fetch error:', candleErr);
+          setBars([]);
+        }
+
+        try {
+          const livePriceData = await api.getLivePrice(sym);
+          if (livePriceData?.ok && livePriceData?.ltp) {
+            setCurrentPrice({
+              symbol: sym,
+              close: livePriceData.ltp,
+              open: livePriceData.open || livePriceData.ltp,
+              high: livePriceData.high || livePriceData.ltp,
+              low: livePriceData.low || livePriceData.ltp,
+              volume: livePriceData.volume || 0,
+              timestamp: livePriceData.last_trade_time || livePriceData.ltt,
+            });
+          } else {
+            setCurrentPrice(null);
+          }
+        } catch {
+          setCurrentPrice(null);
+        }
+        return;
+      }
+
+      // In REPLAY mode: fetch historical price and bars
       const priceQuote = await api.getPrice(sym);
       setCurrentPrice(priceQuote);
 
-      // 2. Fetch bars from 09:15 up to current clock time
       const currentTimeStr = clock?.current_time || '2022-03-10 15:30:00';
       const replayDate = clock?.replay_date || currentTimeStr.split(' ')[0] || '2022-03-10';
       const startTime = `${replayDate} 09:15`;
@@ -119,6 +158,44 @@ export default function App() {
       console.warn('Market data fetch error:', err);
     }
   }, [selectedSymbol, clockStatus]);
+
+  // LIVE mode only: poll GET /live/prices every 2 seconds
+  useEffect(() => {
+    if (clockStatus?.mode !== 'LIVE') return;
+
+    let isMounted = true;
+    const pollLivePrices = async () => {
+      try {
+        const prices = await api.getLivePrices();
+        if (!isMounted) return;
+        setLivePrices(prices || {});
+
+        const selectedLive = prices?.[selectedSymbol];
+        if (selectedLive?.ok && selectedLive?.ltp) {
+          setCurrentPrice({
+            symbol: selectedSymbol,
+            close: selectedLive.ltp,
+            open: selectedLive.open || selectedLive.ltp,
+            high: selectedLive.high || selectedLive.ltp,
+            low: selectedLive.low || selectedLive.ltp,
+            volume: selectedLive.volume || 0,
+            timestamp: selectedLive.last_trade_time || selectedLive.ltt || new Date().toISOString(),
+          });
+        } else if (selectedLive && !selectedLive.ok) {
+          setCurrentPrice(null);
+        }
+      } catch (err) {
+        console.warn('Live prices poll error:', err);
+      }
+    };
+
+    pollLivePrices();
+    const interval = setInterval(pollLivePrices, 2000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [clockStatus?.mode, selectedSymbol]);
 
   // Refresh portfolio & trades
   const refreshPortfolio = useCallback(async () => {
@@ -305,6 +382,8 @@ export default function App() {
               onOrderPlaced={handleOrderPlaced}
               userRules={userRules}
               userId={activeUserId}
+              isLiveMode={clockStatus?.mode === 'LIVE'}
+              livePrices={livePrices}
             />
 
             {/* Portfolio & Trades */}

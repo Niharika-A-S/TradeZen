@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.scenarios.deps import get_db
-from app.core.config import settings
+from app.config import settings
 from app.services.data_health import check_data_health
 
 router = APIRouter(tags=["health"])
@@ -16,7 +16,7 @@ def health():
     """Basic service health check."""
     return {
         "status": "ok",
-        "service": settings.PROJECT_NAME,
+        "service": getattr(settings, "PROJECT_NAME", "TradeZen"),
         "environment": settings.ENVIRONMENT,
     }
 
@@ -33,7 +33,7 @@ def readiness(db: Session = Depends(get_db)):
     return {
         "status": "ready" if db_status == "connected" else "degraded",
         "database": db_status,
-        "service": settings.PROJECT_NAME,
+        "service": getattr(settings, "PROJECT_NAME", "TradeZen"),
     }
 
 
@@ -41,4 +41,3 @@ def readiness(db: Session = Depends(get_db)):
 def data_health(db: Session = Depends(get_db)):
     """Exposes market data and scenario pool health without exposing secrets."""
     return check_data_health(db=db)
-

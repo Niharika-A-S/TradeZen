@@ -30,7 +30,7 @@ def db_session():
 @pytest.fixture(scope="module")
 def client():
     """Test client for FastAPI app."""
-    with patch("app.data.upstox_feed.UpstoxLiveFeed.start"):
+    with patch("app.live.feed.LiveFeedService.start"):
         with TestClient(app) as test_client:
             yield test_client
 

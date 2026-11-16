@@ -9,7 +9,7 @@ import React, { useMemo, useState } from 'react';
  * - Axis text: #9CA3AF
  * - Accent: #3B82F6
  */
-export default function CandlestickChart({ bars = [], symbol = 'INFY', currentPrice = null }) {
+export default function CandlestickChart({ bars = [], symbol = 'INFY', currentPrice = null, isLiveMode = false }) {
   const [hoveredBar, setHoveredBar] = useState(null);
 
   // Filter or take most recent bars if many
@@ -72,9 +72,20 @@ export default function CandlestickChart({ bars = [], symbol = 'INFY', currentPr
 
   if (visibleBars.length === 0) {
     return (
-      <div className="h-[340px] w-full flex flex-col items-center justify-center bg-[#1A1F29] rounded-lg border border-[#2A313C] text-[#9CA3AF]">
-        <div className="animate-spin w-6 h-6 border-2 border-[#3B82F6] border-t-transparent rounded-full mb-3" />
-        <span className="text-xs">Loading market candles for {symbol}...</span>
+      <div className="h-[340px] w-full flex flex-col items-center justify-center bg-[#1A1F29] rounded-lg border border-[#2A313C] text-[#9CA3AF] px-4 text-center">
+        {isLiveMode ? (
+          <>
+            <span className="text-sm font-semibold text-[#D1D5DB] mb-1">Live Candles Awaiting Data</span>
+            <span className="text-xs text-[#9CA3AF] max-w-sm">
+              1-minute bars form continuously during market hours (09:15 – 15:30 IST) as ticks stream from Upstox.
+            </span>
+          </>
+        ) : (
+          <>
+            <div className="animate-spin w-6 h-6 border-2 border-[#3B82F6] border-t-transparent rounded-full mb-3" />
+            <span className="text-xs">Loading market candles for {symbol}...</span>
+          </>
+        )}
       </div>
     );
   }

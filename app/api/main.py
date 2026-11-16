@@ -38,7 +38,8 @@ from app.auth import (
     require_user,
 )
 from app.broker.paper_broker import PaperBroker
-from app.data.upstox_feed import get_upstox_feed
+from app.live import install, price_or_http_error
+from app.live.instruments import INSTRUMENTS, resolve_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -52,36 +53,11 @@ market_clock = MarketClock(
 # Global paper trading broker instance
 paper_broker = PaperBroker(clock=market_clock)
 
-# Global Upstox Live Feed singleton instance linked with MarketClock
-upstox_feed = get_upstox_feed()
-market_clock.set_feed(upstox_feed)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager to start and stop background services cleanly."""
-    token = settings.UPSTOX_ACCESS_TOKEN
-    if token and len(token.strip()) > 0:
-        try:
-            if not upstox_feed._token:
-                upstox_feed._token = token
-            upstox_feed.start()
-            logger.info("Upstox Live Feed started via application lifespan.")
-        except Exception as exc:
-            logger.warning(
-                "Could not start Upstox Live Feed (%s). Backend continuing in Replay/Offline mode.",
-                type(exc).__name__,
-            )
-    else:
-        logger.info("UPSTOX_ACCESS_TOKEN not configured. Live feed remaining offline.")
-
     yield
-
-    try:
-        await upstox_feed.stop()
-        logger.info("Upstox Live Feed stopped via application lifespan.")
-    except Exception as exc:
-        logger.warning("Error stopping Upstox Live Feed: %s", type(exc).__name__)
 
 
 app = FastAPI(
@@ -90,6 +66,9 @@ app = FastAPI(
     version="0.2.0",
     lifespan=lifespan,
 )
+
+# Wire in app.live: installs /live routes and feeds lifecycle into FastAPI app
+live_service = install(app, engine)
 
 # Enable CORS for local browser frontend origins
 app.add_middleware(
@@ -205,12 +184,24 @@ def get_historical_price(
     timestamp: Optional[str] = Query(None, description="Optional timestamp (YYYY-MM-DD HH:MM). Defaults to current clock time."),
     db: Session = Depends(get_db)
 ):
-    """Historical price lookup endpoint.
+    """Historical and live price lookup endpoint.
     
-    If timestamp is specified, returns price bar at that exact historical minute.
-    If omitted, returns price bar at the current MarketClock time.
+    If in LIVE mode (without timestamp), returns price_or_http_error(symbol) from app.live.
+    If in REPLAY mode (or historical timestamp), returns price bar at simulated clock time.
     """
-    sym = symbol.strip().upper()
+    sym = resolve_symbol(symbol) or symbol.strip().upper()
+    if market_clock.mode == ClockMode.LIVE and not timestamp:
+        data = price_or_http_error(sym)
+        return PriceResponse(
+            symbol=data["symbol"],
+            timestamp=data.get("ltt") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            open=float(data.get("open", data.get("ltp", 0.0))),
+            high=float(data.get("high", data.get("ltp", 0.0))),
+            low=float(data.get("low", data.get("ltp", 0.0))),
+            close=float(data.get("ltp", 0.0)),
+            volume=int(data.get("volume", 0)),
+        )
+
     try:
         if timestamp:
             quote = get_price(sym, timestamp, session=db)
@@ -634,7 +625,7 @@ def update_user_rules(user_id: int, req: RulesUpdateRequest, db: Session = Depen
 @app.get("/market/symbols", tags=["Market Data"])
 def get_tradable_symbols():
     """Returns list of tradable universe stocks."""
-    return ["INFY", "RELIANCE", "TCS", "HDFCBANK", "SBIN"]
+    return list(INSTRUMENTS.keys())
 
 
 
@@ -654,12 +645,12 @@ except Exception as _cb_err:
 
 
 # ---------------------------------------------------------------------------
-# Mount Scenario Simulation & Behavioral Coaching Modules (/api/v1)
+# Mount Scenario Simulation Module
 # ---------------------------------------------------------------------------
 try:
-    from app.scenarios.v1 import api_router as scenarios_v1_router
-    app.include_router(scenarios_v1_router, prefix="/api/v1")
-    logger.info("TradeZen Scenario Simulation router mounted successfully under /api/v1.")
+    from app.scenarios.v1 import api_router as scenarios_router
+    app.include_router(scenarios_router, prefix="/api/v1")
+    app.include_router(scenarios_router, prefix="/v1")
+    logger.info("TradeZen Scenarios API mounted successfully.")
 except Exception as _sc_err:
-    logger.warning("Could not mount scenario simulation router: %s", _sc_err)
-
+    logger.warning("Could not mount scenarios router: %s", _sc_err)

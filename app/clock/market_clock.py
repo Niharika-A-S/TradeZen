@@ -7,7 +7,8 @@ Provides:
 - get_price: Historical price lookup function
 - get_bar: Historical PriceBar model lookup function
 """
-from datetime import datetime, date, time, timedelta
+from dataclasses import dataclass
+from datetime import datetime, date, time, timedelta, timezone
 from enum import Enum
 import logging
 from typing import Optional, Union, Dict, Any
@@ -17,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models.price_bar import PriceBar
+from app.live.instruments import resolve_symbol, INSTRUMENTS
+from app.live.parsing import is_trading_window, IST
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +40,47 @@ class LiveQuoteUnavailableError(KeyError):
     while carrying structured details about the symbol and failure reason (disconnected,
     missing quote, or stale data).
     """
-    def __init__(self, symbol: str, reason: str):
+    def __init__(self, symbol: str, reason: str, reason_code: Optional[str] = None):
         self.symbol = symbol.upper()
         self.reason = reason
+        self.reason_code = reason_code
         super().__init__(f"Live quote unavailable for symbol '{self.symbol}': {self.reason}")
+
+
+@dataclass
+class UpstoxQuote:
+    """Represents a live quote for compatibility with feed consumers and test fixtures."""
+    symbol: str
+    ltp: float
+    instrument_key: Optional[str] = None
+    close: Optional[float] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    volume: Optional[int] = None
+    exchange_timestamp: Optional[datetime] = None
+    receipt_timestamp: Optional[datetime] = None
+
+    def is_fresh(self, max_age_seconds: float = 15.0) -> bool:
+        ts = self.receipt_timestamp or self.exchange_timestamp
+        if not ts:
+            return False
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        age = (datetime.now(timezone.utc).replace(tzinfo=None) - ts).total_seconds()
+        return age <= max_age_seconds
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "ltp": self.ltp,
+            "instrument_key": self.instrument_key,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+        }
 
 
 class PriceQuote(float):
@@ -221,15 +261,8 @@ class MarketClock:
         self.mode = ClockMode(mode)
         self.step_minutes = step_minutes
         self.max_quote_age_seconds = max_quote_age_seconds
-
-        # Live feed service injection
+        self.auto_attach_feed = auto_attach_feed
         self._feed = feed
-        if self._feed is None and auto_attach_feed:
-            try:
-                from app.data.upstox_feed import get_upstox_feed
-                self._feed = get_upstox_feed()
-            except Exception:
-                self._feed = None
 
         # Replay configuration
         if isinstance(start_time, str):
@@ -266,7 +299,9 @@ class MarketClock:
 
     @property
     def is_market_open(self) -> bool:
-        """Checks whether current clock time falls within regular trading hours (09:15 - 15:30 on weekdays)."""
+        """Checks whether market is open: IST hours/holidays in LIVE mode, simulated hours in REPLAY."""
+        if self.mode == ClockMode.LIVE:
+            return is_trading_window(datetime.now(IST))
         ct = self.current_time
         if ct.weekday() >= 5:  # Saturday or Sunday
             return False
@@ -364,110 +399,134 @@ class MarketClock:
     def get_live_quote(
         self,
         symbol: str,
-        max_age_seconds: Optional[float] = None
+        max_age_seconds: Optional[float] = None,
+        session: Optional[Session] = None,
     ) -> Optional[PriceQuote]:
-        """In LIVE mode, retrieves the latest fresh Upstox quote for a symbol as a PriceQuote.
-        
-        Returns None if:
-        - Feed service is not attached or is disconnected
-        - No quote exists for the symbol in the feed cache
-        - The cached quote is stale (> max_age_seconds)
-        """
-        sym = symbol.strip().upper()
-        feed = self._feed
-        if feed is None or not getattr(feed, "is_connected", False):
-            return None
-
-        upstox_q = feed.get_latest_quote(sym)
-        if upstox_q is None:
+        """In LIVE mode, retrieves the latest fresh quote from injected feed or app.live service."""
+        sym = resolve_symbol(symbol)
+        if not sym:
             return None
 
         threshold = max_age_seconds if max_age_seconds is not None else self.max_quote_age_seconds
-        if not upstox_q.is_fresh(threshold):
-            return None
+        feed = self._feed
+        if feed is not None and getattr(feed, "is_connected", False):
+            upstox_q = feed.get_latest_quote(sym)
+            if upstox_q is not None and upstox_q.is_fresh(threshold):
+                return PriceQuote(
+                    close=upstox_q.ltp,
+                    open=upstox_q.open if upstox_q.open is not None else upstox_q.ltp,
+                    high=upstox_q.high if upstox_q.high is not None else upstox_q.ltp,
+                    low=upstox_q.low if upstox_q.low is not None else upstox_q.ltp,
+                    volume=upstox_q.volume or 0,
+                    timestamp=upstox_q.exchange_timestamp or upstox_q.receipt_timestamp,
+                    symbol=sym,
+                    is_live=True,
+                )
 
-        return PriceQuote(
-            close=upstox_q.ltp,
-            open=upstox_q.open if upstox_q.open is not None else upstox_q.ltp,
-            high=upstox_q.high if upstox_q.high is not None else upstox_q.ltp,
-            low=upstox_q.low if upstox_q.low is not None else upstox_q.ltp,
-            volume=upstox_q.volume or 0,
-            timestamp=upstox_q.exchange_timestamp or upstox_q.receipt_timestamp,
-            symbol=upstox_q.symbol,
-            is_live=True,
-        )
+        if feed is None and getattr(self, "auto_attach_feed", True):
+            try:
+                from app.live.router import get_service
+                from app.live.feed import LivePriceUnavailable
+                svc = get_service()
+                if svc is not None:
+                    p = svc.get_price(sym)
+                    return PriceQuote(
+                        close=p["ltp"],
+                        open=p.get("open", p["ltp"]),
+                        high=p.get("high", p["ltp"]),
+                        low=p.get("low", p["ltp"]),
+                        volume=p.get("volume", 0),
+                        timestamp=datetime.fromisoformat(p["ltt"]) if p.get("ltt") else datetime.now(IST),
+                        symbol=sym,
+                        is_live=True,
+                    )
+            except Exception:
+                pass
+
+        return None
 
     def check_live_quote_status(
         self,
         symbol: str,
-        max_age_seconds: Optional[float] = None
+        max_age_seconds: Optional[float] = None,
+        session: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """Returns diagnostic details regarding live quote availability for a symbol."""
-        sym = symbol.strip().upper()
+        sym = resolve_symbol(symbol) or symbol.strip().upper()
         threshold = max_age_seconds if max_age_seconds is not None else self.max_quote_age_seconds
         feed = self._feed
+        market_open = is_trading_window(datetime.now(IST))
+        inproc_conn = bool(feed is not None and getattr(feed, "is_connected", False))
+
+        if not resolve_symbol(sym):
+            return {
+                "symbol": sym,
+                "is_available": False,
+                "reason_code": "symbol_not_mapped",
+                "reason": f"Symbol '{sym}' is not mapped to a verified Upstox instrument key",
+                "feed_attached": feed is not None,
+                "feed_connected": inproc_conn,
+                "market_open_ist": market_open,
+                "has_cached_quote": False,
+                "is_fresh": False,
+                "quote": None,
+            }
+
+        pq = self.get_live_quote(sym, max_age_seconds=threshold, session=session)
+        if pq is not None:
+            return {
+                "symbol": sym,
+                "is_available": True,
+                "reason_code": "live",
+                "reason": "Quote is live and fresh",
+                "feed_attached": feed is not None,
+                "feed_connected": inproc_conn,
+                "market_open_ist": market_open,
+                "has_cached_quote": True,
+                "is_fresh": True,
+                "quote": pq.to_dict(),
+            }
+
+        upstox_q = feed.get_latest_quote(sym) if (feed is not None and inproc_conn) else None
+        has_cached = upstox_q is not None
 
         if feed is None:
-            return {
-                "symbol": sym,
-                "is_available": False,
-                "reason": "Feed service is not attached",
-                "feed_attached": False,
-                "feed_connected": False,
-                "has_cached_quote": False,
-                "is_fresh": False,
-                "quote": None,
-            }
+            if not getattr(self, "auto_attach_feed", True):
+                reason_msg = "Feed service is not attached"
+                reason_code = "worker_offline"
+            else:
+                from app.live.router import get_service
+                svc = get_service()
+                if svc is None:
+                    reason_msg = "Feed service is not attached"
+                    reason_code = "worker_offline"
+                else:
+                    reason_msg = f"No quote exists in feed cache for '{sym}'"
+                    reason_code = "no_bars_yet"
+        elif not inproc_conn:
+            reason_msg = "Feed is disconnected"
+            reason_code = "worker_offline"
+        elif upstox_q is None:
+            reason_msg = f"No quote exists in feed cache for '{sym}'"
+            reason_code = "no_bars_yet"
+        else:
+            reason_msg = f"Quote for '{sym}' is stale (exceeded {threshold}s freshness limit)"
+            reason_code = "no_bars_yet"
 
-        is_conn = getattr(feed, "is_connected", False)
-        if not is_conn:
-            return {
-                "symbol": sym,
-                "is_available": False,
-                "reason": "Feed is disconnected",
-                "feed_attached": True,
-                "feed_connected": False,
-                "has_cached_quote": False,
-                "is_fresh": False,
-                "quote": None,
-            }
+        if not market_open:
+            reason_code = "market_closed"
 
-        upstox_q = feed.get_latest_quote(sym)
-        if upstox_q is None:
-            return {
-                "symbol": sym,
-                "is_available": False,
-                "reason": f"No quote exists in feed cache for '{sym}'",
-                "feed_attached": True,
-                "feed_connected": True,
-                "has_cached_quote": False,
-                "is_fresh": False,
-                "quote": None,
-            }
-
-        fresh = upstox_q.is_fresh(threshold)
-        if not fresh:
-            return {
-                "symbol": sym,
-                "is_available": False,
-                "reason": f"Quote for '{sym}' is stale (exceeded {threshold}s freshness limit)",
-                "feed_attached": True,
-                "feed_connected": True,
-                "has_cached_quote": True,
-                "is_fresh": False,
-                "quote": upstox_q.to_dict() if hasattr(upstox_q, "to_dict") else None,
-            }
-
-        pq = self.get_live_quote(sym, max_age_seconds=threshold)
         return {
             "symbol": sym,
-            "is_available": True,
-            "reason": "Quote is live and fresh",
-            "feed_attached": True,
-            "feed_connected": True,
-            "has_cached_quote": True,
-            "is_fresh": True,
-            "quote": pq.to_dict() if pq else None,
+            "is_available": False,
+            "reason_code": reason_code,
+            "reason": reason_msg,
+            "feed_attached": feed is not None,
+            "feed_connected": inproc_conn,
+            "market_open_ist": market_open,
+            "has_cached_quote": has_cached,
+            "is_fresh": False,
+            "quote": upstox_q.to_dict() if (upstox_q is not None and hasattr(upstox_q, "to_dict")) else None,
         }
 
     def get_current_bar(
@@ -499,16 +558,20 @@ class MarketClock:
         In REPLAY mode:
             Retrieves historical price bar from database at simulated replay time.
         In LIVE mode:
-            Resolves latest fresh quote from UpstoxLiveFeed.
-            Raises LiveQuoteUnavailableError if disconnected, missing, or stale.
+            Resolves latest fresh quote from UpstoxLiveFeed or active live worker DB bars.
+            Raises LiveQuoteUnavailableError if unavailable.
             NEVER silently falls back to historical database prices.
         """
         sym = symbol.strip().upper()
         if self.mode == ClockMode.LIVE:
-            quote = self.get_live_quote(sym)
+            quote = self.get_live_quote(sym, session=session)
             if quote is None:
-                diag = self.check_live_quote_status(sym)
-                raise LiveQuoteUnavailableError(symbol=sym, reason=diag["reason"])
+                diag = self.check_live_quote_status(sym, session=session)
+                raise LiveQuoteUnavailableError(
+                    symbol=sym,
+                    reason=diag["reason"],
+                    reason_code=diag.get("reason_code"),
+                )
             return quote
 
         # REPLAY mode

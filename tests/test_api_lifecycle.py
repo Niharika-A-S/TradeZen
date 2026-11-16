@@ -1,138 +1,90 @@
-"""Tests for UpstoxLiveFeed FastAPI application lifecycle integration."""
+"""Tests for app.live FastAPI application lifecycle integration."""
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
-from app.api.main import app, market_clock, upstox_feed
-from app.clock.market_clock import ClockMode, LiveQuoteUnavailableError
-from app.data.upstox_feed import UpstoxLiveFeed, get_upstox_feed
+from app.api.main import app, market_clock
+from app.clock.market_clock import ClockMode
+from app.live.feed import LiveFeedService, CachedTick
+from app.live import parsing as P
+from datetime import datetime, timezone
 
 
-def test_feed_instance_shared_with_market_clock():
-    """Verify that MarketClock and the API share the exact same singleton UpstoxLiveFeed instance."""
-    assert market_clock.feed is not None
-    assert market_clock.feed is upstox_feed
-    assert upstox_feed is get_upstox_feed()
+def test_live_service_installed_on_app_state():
+    """Verify that app.live service is attached to app.state.live_feed."""
+    assert hasattr(app.state, "live_feed")
+    assert isinstance(app.state.live_feed, LiveFeedService)
 
 
-def test_lifespan_starts_feed_when_token_configured():
-    """Verify that lifespan starts UpstoxLiveFeed when UPSTOX_ACCESS_TOKEN is configured."""
-    mock_start = MagicMock()
-    mock_stop = AsyncMock()
-
-    with patch("app.api.main.settings.UPSTOX_ACCESS_TOKEN", "mock_live_token"), \
-         patch.object(upstox_feed, "start", mock_start), \
-         patch.object(upstox_feed, "stop", mock_stop):
-        with TestClient(app) as client:
-            mock_start.assert_called_once()
-            response = client.get("/health")
-            assert response.status_code == 200
-
-        mock_stop.assert_awaited_once()
+def test_live_status_endpoint_returns_feed_status(client: TestClient):
+    """Verify that /live/status returns the real status from app.live."""
+    resp = client.get("/live/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "state" in data
+    assert "symbols" in data
+    assert "market_status" in data
 
 
-def test_lifespan_clean_shutdown():
-    """Verify that exiting lifespan invokes and awaits stop() cleanly."""
-    mock_stop = AsyncMock()
-
-    with patch("app.api.main.settings.UPSTOX_ACCESS_TOKEN", "mock_token"), \
-         patch.object(upstox_feed, "start", MagicMock()), \
-         patch.object(upstox_feed, "stop", mock_stop):
-        with TestClient(app) as client:
-            assert client.get("/").status_code == 200
-
-        mock_stop.assert_awaited_once()
+def test_live_prices_endpoint_returns_all_stocks(client: TestClient):
+    """Verify that /live/prices returns quotes/reasons for all 5 stocks."""
+    resp = client.get("/live/prices")
+    assert resp.status_code == 200
+    data = resp.json()
+    for sym in ["INFY", "RELIANCE", "TCS", "HDFCBANK", "SBIN"]:
+        assert sym in data
 
 
-def test_lifespan_missing_token_handling():
-    """Verify backend starts cleanly and stays offline when token is missing or empty."""
-    mock_start = MagicMock()
-    mock_stop = AsyncMock()
-
-    with patch("app.api.main.settings.UPSTOX_ACCESS_TOKEN", None), \
-         patch.object(upstox_feed, "start", mock_start), \
-         patch.object(upstox_feed, "stop", mock_stop):
-        with TestClient(app) as client:
-            mock_start.assert_not_called()
-
-            # Health and clock endpoints function normally
-            health_res = client.get("/health")
-            assert health_res.status_code == 200
-
-            clock_res = client.get("/clock")
-            assert clock_res.status_code == 200
-            assert clock_res.json()["mode"] == "REPLAY"
-
-        mock_stop.assert_awaited_once()
-
-
-def test_lifespan_connection_failure_handling():
-    """Verify backend continues starting cleanly even if feed.start() raises an exception."""
-    mock_start = MagicMock(side_effect=RuntimeError("Simulated connection error"))
-    mock_stop = AsyncMock()
-
-    with patch("app.api.main.settings.UPSTOX_ACCESS_TOKEN", "mock_token"), \
-         patch.object(upstox_feed, "start", mock_start), \
-         patch.object(upstox_feed, "stop", mock_stop):
-        with TestClient(app) as client:
-            mock_start.assert_called_once()
-
-            # Application is still healthy and operational
-            res = client.get("/health")
-            assert res.status_code == 200
-
-            clock_res = client.get("/clock")
-            assert clock_res.status_code == 200
-
-        mock_stop.assert_awaited_once()
-
-
-def test_live_mode_reports_unavailable_quotes_when_feed_offline():
-    """Verify that in LIVE mode, unavailable quotes raise LiveQuoteUnavailableError and never fall back to replay."""
+def test_price_endpoint_in_live_mode_delegates_to_live_feed(client: TestClient):
+    """Verify that in LIVE mode, /price delegates to app.live price_or_http_error."""
     original_mode = market_clock.mode
     market_clock.mode = ClockMode.LIVE
     try:
-        diag = market_clock.check_live_quote_status("INFY")
-        assert diag["is_available"] is False
+        # With no mock quote cached and live feed not streaming in test, expect HTTP error or price
+        from app.live.router import get_service
+        svc = get_service() or app.state.live_feed
+        t = P.Tick("INFY", 1550.0, 1540.0, 1_700_000_000_000, 10, None)
+        cached = CachedTick(t, datetime.now(timezone.utc), "ws")
+        svc.cache["INFY"] = cached
+        app.state.live_feed.cache["INFY"] = cached
 
-        with pytest.raises(LiveQuoteUnavailableError):
-            market_clock.get_current_price("INFY")
+        resp = client.get("/price?symbol=INFY")
+        assert resp.status_code == 200
+        pdata = resp.json()
+        assert pdata["symbol"] == "INFY"
+        assert pdata["close"] == 1550.0
     finally:
-        # Restore clock to original mode for subsequent tests
         market_clock.mode = original_mode
 
 
-def test_replay_mode_and_endpoints_intact_with_lifespan():
+def test_replay_mode_and_endpoints_intact_with_lifespan(client: TestClient):
     """Verify that Replay Mode clock, tick, and price queries operate as expected."""
-    with patch.object(upstox_feed, "start", MagicMock()), \
-         patch.object(upstox_feed, "stop", AsyncMock()):
-        with TestClient(app) as client:
-            # Root endpoint
-            res = client.get("/")
-            assert res.status_code == 200
-            assert res.json()["status"] == "online"
+    # Root endpoint
+    res = client.get("/")
+    assert res.status_code == 200
+    assert res.json()["status"] == "online"
 
-            # Reset clock to known state
-            switch_res = client.post("/clock/mode", json={
-                "mode": "REPLAY",
-                "replay_date": "2022-03-10",
-                "start_time": "09:15"
-            })
-            assert switch_res.status_code == 200
+    # Reset clock to known state
+    switch_res = client.post("/clock/mode", json={
+        "mode": "REPLAY",
+        "replay_date": "2022-03-10",
+        "start_time": "09:15"
+    })
+    assert switch_res.status_code == 200
 
-            # Clock status
-            clock_res = client.get("/clock")
-            assert clock_res.status_code == 200
-            assert clock_res.json()["mode"] == "REPLAY"
+    # Clock status
+    clock_res = client.get("/clock")
+    assert clock_res.status_code == 200
+    assert clock_res.json()["mode"] == "REPLAY"
 
-            # Tick clock
-            tick_res = client.post("/clock/tick", json={"minutes": 5})
-            assert tick_res.status_code == 200
-            assert tick_res.json()["current_time"] == "2022-03-10 09:20:00"
+    # Tick clock
+    tick_res = client.post("/clock/tick", json={"minutes": 5})
+    assert tick_res.status_code == 200
+    assert tick_res.json()["current_time"] == "2022-03-10 09:20:00"
 
-            # Price lookup in Replay Mode
-            price_res = client.get("/price?symbol=INFY")
-            assert price_res.status_code == 200
-            data = price_res.json()
-            assert data["symbol"] == "INFY"
-            assert data["close"] > 0
+    # Price lookup in Replay Mode
+    price_res = client.get("/price?symbol=INFY")
+    assert price_res.status_code == 200
+    data = price_res.json()
+    assert data["symbol"] == "INFY"
+    assert data["close"] > 0

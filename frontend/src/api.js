@@ -3,7 +3,7 @@
  * Connects to the FastAPI backend with comprehensive error handling.
  */
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || 'http://localhost:8000';
 
 async function request(endpoint, options = {}) {
   const url = `${BASE_URL}${endpoint}`;
@@ -15,7 +15,7 @@ async function request(endpoint, options = {}) {
   };
 
   try {
-    const response = await fetch(url, { ...options, headers });
+    const response = await fetch(url, { credentials: 'include', ...options, headers });
     if (!response.ok) {
       let errorDetail = `HTTP ${response.status}: ${response.statusText}`;
       try {
@@ -72,6 +72,12 @@ export const api = {
   // Market Data
   getSymbols: () => request('/market/symbols'),
   getPrice: (symbol) => request(`/price?symbol=${encodeURIComponent(symbol)}`),
+  getLivePrice: (symbol) => request(`/live/price?symbol=${encodeURIComponent(symbol)}`),
+  getLivePrices: () => request('/live/prices'),
+  getLiveCandles: (symbol, limit = 300) =>
+    request(`/live/candles?symbol=${encodeURIComponent(symbol)}&limit=${limit}`),
+  getLiveStatus: () => request('/live/status'),
+  getLiveInstruments: () => request('/live/instruments'),
   getBars: (symbol, startTime, endTime, limit = 500) => {
     const params = new URLSearchParams({
       symbol,
@@ -107,7 +113,7 @@ export const api = {
     method: 'POST',
   }),
 
-  // Behavioral Rules & ML Coaching
+  // Behavioral Rules & ML Coaching (Paper Trading)
   getRules: (userId = 1) => request(`/rules/${userId}`),
   getCurrentRules: (userId = 1) => request(`/rules/${userId}`),
   updateRules: (userId = 1, rules) => request(`/rules/${userId}`, {
@@ -124,7 +130,15 @@ export const api = {
     body: JSON.stringify({ user_id: userId, create_alert: true }),
   }),
 
-  // Scenario Simulation & Behavioral Practice
+  // Scenario Simulation & Behavioral Practice (ScenarioSimulation2)
+  getReasons: (action) => request(`/api/v1/reasons?action=${encodeURIComponent(action)}`),
+  getScenarioRules: () => request('/api/v1/rules/current'),
+  setScenarioRules: (data) => request('/api/v1/rules', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  getRuleHistory: () => request('/api/v1/rules/history'),
+  getScenarioRuleHistory: () => request('/api/v1/rules/history'),
   getNextScenarios: (limit = 15) => request(`/api/v1/scenarios/next?limit=${limit}`),
   getReveal: (scenarioId) => request(`/api/v1/scenarios/${scenarioId}/reveal`),
   submitDecision: (data) => request('/api/v1/decisions', {
@@ -138,4 +152,9 @@ export const api = {
   restartProgress: () => request('/api/v1/progress/restart', { method: 'POST' }),
   getDashboard: () => request('/api/v1/progress/dashboard'),
   getDataHealth: () => request('/api/v1/admin/data-health'),
+  checkHealth: () => request('/api/v1/health'),
+  logout: () => request('/auth/logout', { method: 'POST' }),
+  refresh: () => request('/auth/refresh', { method: 'POST' }),
 };
+
+export default api;

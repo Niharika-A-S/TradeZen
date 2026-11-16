@@ -11,9 +11,21 @@ echo "========================================================"
 echo ""
 
 # 1. Check Python virtual environment
-if [ ! -f ".venv/bin/uvicorn" ]; then
-    echo "[ERROR] Virtual environment not found at .venv/"
-    echo "Please run ./setup.sh first to configure your environment."
+if [ -f ".venv/bin/python" ]; then
+    PYTHON_CMD=".venv/bin/python"
+    echo "[INFO] Using virtual environment at .venv/bin/python"
+elif [ -f ".venv/Scripts/python.exe" ]; then
+    PYTHON_CMD=".venv/Scripts/python.exe"
+    echo "[INFO] Using virtual environment at .venv/Scripts/python.exe"
+elif command -v python >/dev/null 2>&1 && python -c "import uvicorn" >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+    echo "[INFO] Using system Python environment (python)"
+elif command -v python3 >/dev/null 2>&1 && python3 -c "import uvicorn" >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+    echo "[INFO] Using system Python environment (python3)"
+else
+    echo "[ERROR] Virtual environment or system uvicorn not found."
+    echo "Please run ./setup.sh or run 'pip install -r requirements.txt' first."
     exit 1
 fi
 
@@ -42,8 +54,7 @@ trap cleanup EXIT INT TERM
 
 # 4. Start FastAPI Backend
 echo "[1/2] Starting FastAPI Backend on http://localhost:8000..."
-source .venv/bin/activate
-uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload &
+"$PYTHON_CMD" -m uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --workers 1 --reload &
 
 # 5. Start React Frontend
 echo "[2/2] Starting React Frontend on http://localhost:5173..."
