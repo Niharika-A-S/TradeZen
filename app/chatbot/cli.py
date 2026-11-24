@@ -88,6 +88,61 @@ def handle_health(args):
     print("----------------------------------------")
 
 
+def handle_llm_check(args):
+    """Subcommand: llm-check.
+    Runs tiny call, ~3,000 chars call, and full-pipeline call.
+    Prints ONLY status, error class, and elapsed ms (no keys, no prompt text, no trade values).
+    """
+    import time
+    from .llm import llm_client
+
+    print("--- TradeZen LLM Diagnostic Check ---")
+
+    # 1. Tiny call
+    t0 = time.monotonic()
+    res1 = llm_client.generate(
+        system="Be concise.",
+        messages=[{"role": "user", "content": "ping"}],
+        max_output_tokens=50,
+        flow="general"
+    )
+    ms1 = int((time.monotonic() - t0) * 1000)
+    status1 = "OK" if res1.ok else "FAILED"
+    err1 = res1.error_kind if not res1.ok else "None"
+    print(f"1. Tiny Call: status={status1} error_class={err1} elapsed_ms={ms1}")
+
+    # 2. ~3,000 characters prompt call
+    long_prompt = "Analyze trading summary: " + ("word " * 600)
+    t0 = time.monotonic()
+    res2 = llm_client.generate(
+        system="Be concise.",
+        messages=[{"role": "user", "content": long_prompt}],
+        max_output_tokens=100,
+        flow="general"
+    )
+    ms2 = int((time.monotonic() - t0) * 1000)
+    status2 = "OK" if res2.ok else "FAILED"
+    err2 = res2.error_kind if not res2.ok else "None"
+    print(f"2. ~3,000 Chars Call: status={status2} error_class={err2} elapsed_ms={ms2}")
+
+    # 3. Full pipeline call
+    user_id = getattr(args, "user_id", 1) or 1
+    t0 = time.monotonic()
+    try:
+        from .brain import answer
+        ans = answer(user_id=user_id, message="Explain my last trade")
+        ms3 = int((time.monotonic() - t0) * 1000)
+        status3 = "OK" if not ans.get("degraded", False) else "DEGRADED"
+        err3 = ans.get("degraded_reason") or "None"
+        route3 = ans.get("route", "UNKNOWN")
+        print(f"3. Full Pipeline Call (user_id={user_id}): status={status3} route={route3} error_class={err3} elapsed_ms={ms3}")
+    except Exception as exc:
+        ms3 = int((time.monotonic() - t0) * 1000)
+        print(f"3. Full Pipeline Call: status=EXCEPTION error_class={type(exc).__name__} elapsed_ms={ms3}")
+
+    print("--------------------------------------")
+
+
 def main():
     parser = argparse.ArgumentParser(description="TradeZen Chatbot CLI")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -102,6 +157,10 @@ def main():
     # Health parser
     subparsers.add_parser("health", help="Check chatbot health and configuration status")
 
+    # LLM Check parser
+    llm_check_parser = subparsers.add_parser("llm-check", help="Run diagnostic checks on Gemini connectivity")
+    llm_check_parser.add_argument("--user-id", type=int, default=1, help="User ID for full pipeline check")
+
     args = parser.parse_args()
     if args.subcommand == "ingest":
         handle_ingest(args)
@@ -109,6 +168,8 @@ def main():
         handle_eval(args)
     elif args.subcommand == "health":
         handle_health(args)
+    elif args.subcommand == "llm-check":
+        handle_llm_check(args)
 
 
 if __name__ == "__main__":

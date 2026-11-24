@@ -1,10 +1,15 @@
-"""Official google-genai SDK wrapper for TradeZen Chatbot."""
+"""Official google-genai SDK wrapper for TradeZen Chatbot with safe JSON serialization and resiliency."""
 from dataclasses import dataclass, field
+from decimal import Decimal
+from datetime import datetime, date
+import json
 import logging
+import os
 import random
 import threading
 import time
 from typing import List, Optional, Union, Dict, Any
+import uuid
 
 import numpy as np
 
@@ -12,6 +17,52 @@ from .config import cfg
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Safe JSON Serializer for Database Facts & Profile Data
+# ---------------------------------------------------------------------------
+
+class SafeJSONEncoder(json.JSONEncoder):
+    """Safe JSON encoder handling Decimal, datetime, date, UUID, numpy types."""
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            f = float(obj)
+            return int(f) if f.is_integer() else f
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        module = getattr(type(obj), "__module__", "")
+        if "numpy" in module:
+            if isinstance(obj, np.floating):
+                f = float(obj)
+                return int(f) if f.is_integer() else f
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        if hasattr(obj, "isoformat"):
+            return obj.isoformat()
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
+
+
+def safe_json_dumps(obj: Any, **kwargs) -> str:
+    """Serializes arbitrary facts/dicts to JSON without throwing TypeError on DB types."""
+    kwargs.setdefault("ensure_ascii", False)
+    kwargs.setdefault("cls", SafeJSONEncoder)
+    try:
+        return json.dumps(obj, **kwargs)
+    except Exception as exc:
+        logger.warning("safe_json_dumps fallback triggered: %s", exc)
+        return json.dumps(str(obj))
+
+
+# ---------------------------------------------------------------------------
+# LLM Data Structures & Circuit Breaker
+# ---------------------------------------------------------------------------
 
 @dataclass
 class LLMResult:
@@ -22,7 +73,7 @@ class LLMResult:
 
 
 class CircuitBreaker:
-    """Thread-safe circuit breaker that trips after 3 consecutive failures for 60 seconds."""
+    """Thread-safe circuit breaker that trips after consecutive failures, self-recovering half-open."""
     def __init__(self, failure_threshold: int = 3, recovery_time: float = 60.0):
         self.failure_threshold = failure_threshold
         self.recovery_time = recovery_time
@@ -35,7 +86,7 @@ class CircuitBreaker:
         with self._lock:
             if self.consecutive_failures >= self.failure_threshold:
                 if now - self.last_failure_time > self.recovery_time:
-                    # Half-open/recovered
+                    # Half-open: allow a trial request and reset counter
                     self.consecutive_failures = 0
                     return True
                 return False
@@ -51,6 +102,19 @@ class CircuitBreaker:
             self.consecutive_failures += 1
             self.last_failure_time = now
 
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self.consecutive_failures >= self.failure_threshold:
+                if time.time() - self.last_failure_time > self.recovery_time:
+                    return "half-open"
+                return "open"
+            return "closed"
+
+
+# ---------------------------------------------------------------------------
+# GeminiWrapper
+# ---------------------------------------------------------------------------
 
 class GeminiWrapper:
     """Thread-safe, resilient wrapper for the official google-genai SDK."""
@@ -59,10 +123,18 @@ class GeminiWrapper:
         self.config = config
         self._client = None
         self._client_lock = threading.Lock()
-        self.circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_time=60.0)
+        # Per-flow circuit breakers so a failure in one flow does not block others
+        self._breakers: Dict[str, CircuitBreaker] = {
+            "general": CircuitBreaker(failure_threshold=3, recovery_time=60.0),
+            "personalised": CircuitBreaker(failure_threshold=3, recovery_time=60.0),
+        }
+        self.circuit_breaker = self._breakers["general"]  # backward-compat alias
         # Custom mock hooks for tests
         self._fake_generate = None
         self._fake_embed = None
+
+    def get_circuit_breaker(self, flow: str = "general") -> CircuitBreaker:
+        return self._breakers.get(flow, self._breakers["general"])
 
     def _get_client(self):
         """Lazily initialize and return the google.genai Client."""
@@ -72,9 +144,11 @@ class GeminiWrapper:
             if self._client is None:
                 try:
                     from google import genai
+                    # Read timeout from config
+                    timeout_val = getattr(self.config, "LLM_TIMEOUT_SECONDS", 20)
                     self._client = genai.Client(
                         api_key=self.config.GEMINI_API_KEY,
-                        http_options={"timeout": self.config.LLM_TIMEOUT_SECONDS}
+                        http_options={"timeout": timeout_val}
                     )
                 except Exception as exc:
                     logger.warning("Failed to initialize google-genai Client: %s", exc)
@@ -85,8 +159,10 @@ class GeminiWrapper:
         self,
         system: Optional[str] = None,
         messages: Optional[List[Dict[str, str]]] = None,
-        max_output_tokens: Optional[int] = 1000,
+        max_output_tokens: Optional[int] = 1500,
         temperature: Optional[float] = 0.2,
+        flow: str = "general",
+        timeout: Optional[int] = None,
     ) -> LLMResult:
         """Generates chat completion text. Never raises exceptions to caller."""
         if self._fake_generate is not None:
@@ -99,7 +175,14 @@ class GeminiWrapper:
         if not self.config.has_gemini_key:
             return LLMResult(ok=False, error_kind="NO_KEY")
 
-        if not self.circuit_breaker.allow_request():
+        breaker = self.get_circuit_breaker(flow)
+        if not breaker.allow_request():
+            logger.warning(
+                "Gemini circuit breaker OPEN for flow=%s — model=%s failures=%d",
+                flow,
+                self.config.GEMINI_CHAT_MODEL,
+                breaker.consecutive_failures,
+            )
             return LLMResult(ok=False, error_kind="CIRCUIT_OPEN")
 
         client = self._get_client()
@@ -108,22 +191,73 @@ class GeminiWrapper:
 
         from google.genai import types
 
-        # Build contents from messages
+        # Build contents: validate roles ('user', 'model'), merge consecutive same-role turns,
+        # drop empty turns and drop turns containing old refusal or limited mode badges
+        raw_messages = messages or []
         contents = []
-        if messages:
-            for m in messages:
-                role = "user" if m.get("role") in ("user", "human") else "model"
-                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m.get("content", ""))]))
+        for m in raw_messages:
+            role = "user" if m.get("role") in ("user", "human") else "model"
+            content_text = (m.get("content") or "").strip()
+            if not content_text:
+                continue
+            # Drop saved refusal or degraded notice boilerplate from history sent to model
+            if "I am an educational trading coach" in content_text and "SEBI registration" in content_text:
+                continue
+            if "Limited mode" in content_text and len(content_text) < 100:
+                continue
 
-        gen_config = types.GenerateContentConfig(
-            system_instruction=system if system else None,
-            max_output_tokens=max_output_tokens,
-            temperature=temperature,
-            http_options=types.HttpOptions(timeout=self.config.LLM_TIMEOUT_SECONDS * 1000)
-        )
+            # Trim overly long earlier assistant replies to save context
+            if role == "model" and len(content_text) > 1500:
+                content_text = content_text[:1500] + "..."
 
-        max_retries = 2
+            if contents and contents[-1].role == role:
+                prev_text = contents[-1].parts[0].text if contents[-1].parts else ""
+                contents[-1] = types.Content(role=role, parts=[types.Part.from_text(text=prev_text + "\n" + content_text)])
+            else:
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content_text)]))
+
+        if not contents:
+            return LLMResult(ok=False, error_kind="EMPTY_PROMPT")
+
+        prompt_chars = sum(len(c.parts[0].text) for c in contents if c.parts)
+        if system:
+            prompt_chars += len(system)
+
+        # Timeout selection: per-call override or flow-specific default
+        if timeout is None:
+            if flow == "personalised":
+                timeout = getattr(self.config, "LLM_TIMEOUT_PERSONALISED_SECONDS", 30)
+            else:
+                timeout = getattr(self.config, "LLM_TIMEOUT_SECONDS", 20)
+
+        # Build GenerateContentConfig with thinking budget (disabled by default to prevent token exhaustion)
+        thinking_budget = getattr(self.config, "LLM_THINKING_BUDGET", 0)
+        thinking_cfg = None
+        try:
+            thinking_cfg = types.ThinkingConfig(thinking_budget=thinking_budget)
+        except Exception:
+            pass
+
+        gen_config_kwargs: Dict[str, Any] = {
+            "system_instruction": system if system else None,
+            "max_output_tokens": max_output_tokens or 1500,
+            "temperature": temperature,
+            "http_options": types.HttpOptions(timeout=timeout * 1000)
+        }
+        if thinking_cfg is not None:
+            gen_config_kwargs["thinking_config"] = thinking_cfg
+
+        try:
+            gen_config = types.GenerateContentConfig(**gen_config_kwargs)
+        except Exception:
+            # Fallback without thinking_config if unsupported
+            gen_config_kwargs.pop("thinking_config", None)
+            gen_config = types.GenerateContentConfig(**gen_config_kwargs)
+
+        # At most 1 retry (total 2 attempts) only for rate-limit, 5xx, or network timeout
+        max_retries = 1
         last_error_kind = "UNKNOWN"
+        t_start = time.monotonic()
 
         for attempt in range(max_retries + 1):
             try:
@@ -133,24 +267,29 @@ class GeminiWrapper:
                     config=gen_config
                 )
 
-                # Check for empty, blocked or truncated response
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
+
                 if not response.candidates or len(response.candidates) == 0:
-                    self.circuit_breaker.record_failure()
+                    breaker.record_failure()
                     return LLMResult(ok=False, error_kind="EMPTY")
 
                 candidate = response.candidates[0]
                 finish_reason = getattr(candidate, "finish_reason", None)
                 finish_str = str(finish_reason).upper() if finish_reason else ""
                 if "SAFETY" in finish_str or "BLOCKED" in finish_str:
-                    self.circuit_breaker.record_failure()
+                    breaker.record_failure()
                     return LLMResult(ok=False, error_kind="BLOCKED")
 
                 text = response.text
                 if not text or not text.strip():
-                    self.circuit_breaker.record_failure()
+                    breaker.record_failure()
                     return LLMResult(ok=False, error_kind="EMPTY")
 
-                self.circuit_breaker.record_success()
+                breaker.record_success()
+                logger.debug(
+                    "Gemini generate OK — model=%s flow=%s prompt_chars=%d elapsed_ms=%d",
+                    self.config.GEMINI_CHAT_MODEL, flow, prompt_chars, elapsed_ms,
+                )
                 return LLMResult(ok=True, text=text.strip())
 
             except Exception as exc:
@@ -168,17 +307,22 @@ class GeminiWrapper:
                 else:
                     last_error_kind = "NETWORK_ERROR"
 
-                logger.warning("Gemini generate call attempt %d failed: %s", attempt + 1, exc)
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
+                logger.warning(
+                    "Gemini generate attempt %d/%d failed — model=%s flow=%s error_kind=%s prompt_chars=%d elapsed_ms=%d",
+                    attempt + 1, max_retries + 1,
+                    self.config.GEMINI_CHAT_MODEL, flow, last_error_kind, prompt_chars, elapsed_ms,
+                )
 
                 if attempt < max_retries and (is_rate_limit or is_server_error or is_timeout):
-                    backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
+                    backoff = (2 ** attempt) + random.uniform(0.1, 0.4)
                     time.sleep(backoff)
                     continue
                 else:
-                    self.circuit_breaker.record_failure()
+                    breaker.record_failure()
                     return LLMResult(ok=False, error_kind=last_error_kind)
 
-        self.circuit_breaker.record_failure()
+        breaker.record_failure()
         return LLMResult(ok=False, error_kind=last_error_kind)
 
     def embed(self, texts: List[str], kind: str = "document") -> LLMResult:
@@ -192,7 +336,8 @@ class GeminiWrapper:
         if not self.config.has_gemini_key:
             return LLMResult(ok=False, error_kind="NO_KEY")
 
-        if not self.circuit_breaker.allow_request():
+        breaker = self.get_circuit_breaker("general")
+        if not breaker.allow_request():
             return LLMResult(ok=False, error_kind="CIRCUIT_OPEN")
 
         client = self._get_client()
@@ -214,7 +359,6 @@ class GeminiWrapper:
             http_options=types.HttpOptions(timeout=self.config.LLM_TIMEOUT_SECONDS * 1000)
         )
 
-        # Batch embed with fallback to one-by-one
         batch_size = 16
         all_vectors = []
 
@@ -224,21 +368,20 @@ class GeminiWrapper:
             if batch_result.ok and batch_result.vectors:
                 all_vectors.extend(batch_result.vectors)
             else:
-                # Fallback to one text per request
                 logger.info("Batch embedding failed; falling back to 1 text per request")
                 for single_text in batch:
                     single_res = self._embed_batch_with_retry(client, model_name, [single_text], embed_config)
                     if single_res.ok and single_res.vectors:
                         all_vectors.extend(single_res.vectors)
                     else:
-                        self.circuit_breaker.record_failure()
+                        breaker.record_failure()
                         return LLMResult(ok=False, error_kind=single_res.error_kind or "EMBED_FAILED")
 
-        self.circuit_breaker.record_success()
+        breaker.record_success()
         return LLMResult(ok=True, vectors=all_vectors)
 
     def _embed_batch_with_retry(self, client, model_name, texts_batch: List[str], embed_config) -> LLMResult:
-        max_retries = 2
+        max_retries = 1
         last_error_kind = "UNKNOWN"
 
         for attempt in range(max_retries + 1):
@@ -251,7 +394,6 @@ class GeminiWrapper:
 
                 raw_embeddings = getattr(response, "embeddings", None)
                 if not raw_embeddings:
-                    # Single response format check
                     embedding_obj = getattr(response, "embedding", None)
                     if embedding_obj:
                         raw_embeddings = [embedding_obj]
@@ -292,7 +434,7 @@ class GeminiWrapper:
                     last_error_kind = "NETWORK_ERROR"
 
                 if attempt < max_retries and (is_rate_limit or is_server_error or is_timeout):
-                    backoff = (2 ** attempt) + random.uniform(0.1, 0.5)
+                    backoff = (2 ** attempt) + random.uniform(0.1, 0.4)
                     time.sleep(backoff)
                     continue
                 else:

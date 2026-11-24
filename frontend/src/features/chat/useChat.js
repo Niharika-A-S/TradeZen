@@ -140,6 +140,8 @@ export function useChat() {
           sources: res.sources,
           used_data: res.used_data,
           degraded: res.degraded,
+          degraded_reason: res.degraded_reason,
+          no_data: res.no_data,
           created_at: res.created_at || new Date().toISOString(),
         };
         setMessages((prev) => [...prev, botMsg]);

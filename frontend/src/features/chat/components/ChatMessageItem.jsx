@@ -50,10 +50,10 @@ export default function ChatMessageItem({ message }) {
             </span>
           )}
 
-          {message.degraded && (
+          {message.degraded && !message.no_data && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#3A2E0F] text-[#FBBF24] text-[11px] font-medium">
               <AlertCircle className="w-3 h-3" />
-              Limited mode
+              Limited mode{message.degraded_reason ? ` (${message.degraded_reason})` : ''}
             </span>
           )}
 

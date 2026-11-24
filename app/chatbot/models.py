@@ -103,6 +103,41 @@ class ChatNote(Base):
     )
 
 
+class JSONEncodedDict(TypeDecorator):
+    """Enables portable JSON dict storage across SQLite and PostgreSQL."""
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            return json.dumps(value)
+        return None
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            try:
+                return json.loads(value)
+            except Exception:
+                return {}
+        return None
+
+
+class ChatUserProfile(Base):
+    """Stores user trading profile and fingerprint for the coaching layer."""
+    __tablename__ = "chat_user_profile"
+
+    user_id = Column(Integer, primary_key=True)
+    profile = Column(JSONEncodedDict, nullable=False, default=dict)
+    previous_profile = Column(JSONEncodedDict, nullable=True)
+    fingerprint = Column(String(255), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+
 # Database Engine and Session creation
 _engine = None
 _SessionFactory = None

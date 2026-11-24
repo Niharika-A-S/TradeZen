@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  MessageSquare,
   X,
   Trash2,
   BookmarkPlus,
@@ -10,16 +9,19 @@ import {
   ShieldAlert,
   Loader2,
 } from 'lucide-react';
+import coachIcon from '../assets/coach-icon.jpg';
 import { useChat } from '../useChat';
 import ChatMessageItem from './ChatMessageItem';
 import ChatComposer from './ChatComposer';
 
-const SUGGESTIONS = [
-  'Explain my last session',
-  'Why am I losing?',
-  'What is a stop-loss?',
-  'Show my rules',
+const QUICK_ACTION_CHIPS = [
+  'Explain my last trade',
+  'Why did I lose?',
+  'My scenario decisions',
+  'My habits',
 ];
+
+const SUGGESTIONS = QUICK_ACTION_CHIPS;
 
 export default function ChatPanel({ isOpen, onClose }) {
   const {
@@ -114,9 +116,9 @@ export default function ChatPanel({ isOpen, onClose }) {
     >
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#2A313C] bg-[#0E1116]/80 backdrop-blur-sm">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-[#2563EB]/20 border border-[#2563EB]/40 flex items-center justify-center text-[#3B82F6]">
-            <MessageSquare className="w-4 h-4" />
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-full overflow-hidden border border-amber-500/40 bg-[#0D1117] flex items-center justify-center flex-shrink-0">
+            <img src={coachIcon} alt="TradeZen Coach" className="w-full h-full object-cover" />
           </div>
           <div>
             <h2 className="text-sm font-semibold text-[#F9FAFB]">TradeZen Coach</h2>
@@ -217,8 +219,8 @@ export default function ChatPanel({ isOpen, onClose }) {
       >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4">
-            <div className="w-12 h-12 rounded-2xl bg-[#11161F] border border-[#2A313C] flex items-center justify-center text-[#3B82F6] mb-3">
-              <MessageSquare className="w-6 h-6" />
+            <div className="w-16 h-16 rounded-2xl overflow-hidden border border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.2)] flex items-center justify-center bg-[#0D1117] mb-3">
+              <img src={coachIcon} alt="TradeZen Coach" className="w-full h-full object-cover" />
             </div>
             <h3 className="text-sm font-semibold text-[#F9FAFB] mb-1">Welcome to TradeZen Coach</h3>
             <p className="text-xs text-[#9CA3AF] max-w-xs mb-6">
@@ -254,6 +256,20 @@ export default function ChatPanel({ isOpen, onClose }) {
             <div ref={messagesEndRef} />
           </>
         )}
+      </div>
+
+      {/* Quick Action Chips Bar */}
+      <div className="flex items-center gap-1.5 px-3 py-1.5 overflow-x-auto border-t border-[#2A313C] bg-[#11161F]">
+        {QUICK_ACTION_CHIPS.map((chip, idx) => (
+          <button
+            key={`quick-chip-${idx}`}
+            onClick={() => sendMessage(chip)}
+            disabled={isLoading || rateLimitTimeLeft > 0}
+            className="whitespace-nowrap px-2.5 py-1 rounded-full bg-[#1E3A5F]/60 border border-[#2A313C] hover:border-[#3B82F6] text-[11px] font-medium text-[#3B82F6] hover:bg-[#1E3A5F] transition-all disabled:opacity-40"
+          >
+            {chip}
+          </button>
+        ))}
       </div>
 
       {/* Composer */}

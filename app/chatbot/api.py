@@ -12,8 +12,15 @@ from pydantic import BaseModel, Field
 from .config import cfg
 from .brain import answer
 from .rag import rag_engine
-from .models import ChatMessage, ChatKbChunk, get_db_session, init_db
-from .adapters import get_recent_rule_violations
+from .llm import llm_client
+from .models import ChatMessage, ChatKbChunk, ChatUserProfile, get_db_session, init_db
+from .adapters import (
+    get_recent_rule_violations,
+    get_last_trade_context,
+    get_scenario_decisions,
+    validate_schema_health,
+)
+from .profile import ensure_fresh_profile, fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +104,8 @@ class ChatResponse(BaseModel):
     sources: List[Dict[str, Any]] = []
     used_data: bool = False
     degraded: bool = False
+    degraded_reason: Optional[str] = None
+    no_data: bool = False
     message_id: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -153,6 +162,8 @@ def send_chat_message(
         sources=ans.get("sources", []),
         used_data=ans.get("used_data", False),
         degraded=ans.get("degraded", False),
+        degraded_reason=ans.get("degraded_reason"),
+        no_data=ans.get("no_data", False),
         message_id=body.client_message_id,
         created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
@@ -221,12 +232,42 @@ def save_chat_note(
     return {"ok": True, "message": "Note saved successfully"}
 
 
+@router.get("/profile")
+def get_user_chat_profile(
+    user_id: int = Depends(get_current_user_id)
+):
+    """Retrieves compact trading behavior profile for the logged-in user."""
+    prof = ensure_fresh_profile(user_id)
+    cov = prof.get("coverage", {})
+    if cov.get("closed_trades_count", 0) == 0 and cov.get("scenario_decisions_count", 0) == 0:
+        return {"available": False, "reason": "no_data_yet"}
+
+    return {
+        "available": True,
+        "coverage": cov,
+        "performance": prof.get("performance", {}).get("all_time", {}),
+        "habits": {
+            "median_size": prof.get("habits", {}).get("user_median_size", 0.0),
+            "size_after_loss_ratio": prof.get("habits", {}).get("size_after_loss_vs_normal", 1.0),
+            "rule_adherence_rate_pct": prof.get("habits", {}).get("rule_adherence_rate_pct", 100.0),
+            "stop_loss_usage_pct": prof.get("habits", {}).get("stop_loss_usage_pct", 0.0),
+            "hold_time_winners_mins": prof.get("habits", {}).get("user_median_hold_winners_mins", 0.0),
+            "hold_time_losers_mins": prof.get("habits", {}).get("user_median_hold_losers_mins", 0.0)
+        },
+        "repeated_mistakes": [
+            {"mistake_id": m.get("mistake_id"), "count": m.get("count")}
+            for m in prof.get("repeated_mistakes", [])[:3]
+        ],
+        "trend": prof.get("trend")
+    }
+
+
 @router.get("/nudges")
 def get_rule_nudges(
     since: Optional[str] = Query(None),
     user_id: int = Depends(get_current_user_id)
 ):
-    """Builds short template nudges without Gemini from recent rule violations."""
+    """Builds short template nudges without Gemini from recent activity (max 3 per call)."""
     since_dt = None
     if since:
         try:
@@ -236,12 +277,35 @@ def get_rule_nudges(
     if not since_dt:
         since_dt = datetime.now(timezone.utc) - timedelta(minutes=15)
 
+    nudges: List[Dict[str, Any]] = []
+
+    # 1. New closed losing trade
+    trade_ctx_res = get_last_trade_context(user_id)
+    if trade_ctx_res.ok and trade_ctx_res.data and not trade_ctx_res.data.get("is_open"):
+        lt = trade_ctx_res.data
+        pnl = lt.get("pnl", 0.0)
+        exit_time = lt.get("exit_time")
+        if pnl < 0 and exit_time:
+            try:
+                ex_dt = datetime.fromisoformat(exit_time.replace("Z", "+00:00"))
+                if ex_dt >= since_dt:
+                    stable_id = f"nudge_loss_{lt.get('trade_id', 0)}_{exit_time}"
+                    nudges.append({
+                        "id": stable_id,
+                        "severity": "WARNING",
+                        "message": f"Your last trade closed at −₹{abs(pnl):,.2f}. Want me to walk through it?",
+                        "created_at": exit_time
+                    })
+            except Exception:
+                pass
+
+    # 2. Rule violations
     violations_res = get_recent_rule_violations(user_id=user_id, since=since_dt)
     violations = violations_res.data if violations_res.ok else []
-
-    nudges = []
-    for v in violations[:3]:
-        stable_id = f"nudge_{v.get('id', 0)}_{v.get('created_at', '')}"
+    for v in violations:
+        if len(nudges) >= 3:
+            break
+        stable_id = f"nudge_rule_{v.get('id', 0)}_{v.get('created_at', '')}"
         nudges.append({
             "id": stable_id,
             "severity": v.get("severity", "WARNING"),
@@ -249,22 +313,85 @@ def get_rule_nudges(
             "created_at": v.get("created_at")
         })
 
-    return nudges
+    # 3. Finished scenario session
+    if len(nudges) < 3:
+        scn_res = get_scenario_decisions(user_id, session="latest", limit=1)
+        if scn_res.ok and scn_res.data:
+            latest_att = scn_res.data[0]
+            att_time = latest_att.get("created_at")
+            if att_time:
+                try:
+                    at_dt = datetime.fromisoformat(att_time.replace("Z", "+00:00"))
+                    if at_dt >= since_dt:
+                        stable_id = f"nudge_scenario_{latest_att.get('attempt_id', 0)}_{att_time}"
+                        nudges.append({
+                            "id": stable_id,
+                            "severity": "INFO",
+                            "message": f"You completed a practice scenario decision on {latest_att.get('action', '').upper()}. Want to review your choices?",
+                            "created_at": att_time
+                        })
+                except Exception:
+                    pass
+
+    # 4. Repeated mistake
+    if len(nudges) < 3:
+        prof = ensure_fresh_profile(user_id)
+        mistakes = prof.get("repeated_mistakes", [])
+        if mistakes and mistakes[0].get("count", 0) >= 2:
+            top_m = mistakes[0]
+            m_id = top_m.get("mistake_id")
+            m_time = top_m.get("last_timestamp")
+            stable_id = f"nudge_repeat_{m_id}_{top_m.get('count')}"
+            nudges.append({
+                "id": stable_id,
+                "severity": "WARNING",
+                "message": f"Discipline pattern notice: '{m_id.replace('_', ' ')}' flagged {top_m.get('count')} times. Want to see habit suggestions?",
+                "created_at": m_time or datetime.now(timezone.utc).isoformat()
+            })
+
+    # Deduplicate by id and limit to 3
+    seen_ids = set()
+    deduped = []
+    for n in nudges:
+        if n["id"] not in seen_ids:
+            seen_ids.add(n["id"])
+            deduped.append(n)
+        if len(deduped) >= 3:
+            break
+
+    return deduped
 
 
 @router.get("/health")
-def get_chat_health():
-    """Health check without exposing secrets."""
+def get_chat_health(user_id: int = Depends(get_current_user_id)):
+    """Health check reporting connected data sources and profile freshness without exposing data values."""
     init_db()
     db = get_db_session()
     count = 0
+    profile_freshness = "empty"
     try:
         count = db.query(ChatKbChunk).count()
+        row = db.query(ChatUserProfile).filter(ChatUserProfile.user_id == user_id).first()
+        if row:
+            current_fp = fingerprint(user_id)
+            profile_freshness = "fresh" if row.fingerprint == current_fp else "stale"
+    except Exception:
+        pass
     finally:
         db.close()
+
+    schema_status = validate_schema_health()
 
     return {
         "mode": "full" if cfg.has_gemini_key else "limited",
         "embeddings": "active" if cfg.has_gemini_key else "fallback",
-        "chunks_count": count
+        "chunks_count": count,
+        "data_sources": schema_status,
+        "profile_freshness": profile_freshness,
+        "llm_circuit_breaker": {
+            "state": getattr(llm_client.circuit_breaker, "state", "closed"),
+            "consecutive_failures": llm_client.circuit_breaker.consecutive_failures,
+            "recovery_time_s": llm_client.circuit_breaker.recovery_time,
+        },
+        "llm_model": cfg.GEMINI_CHAT_MODEL,
     }
