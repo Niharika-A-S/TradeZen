@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import random
+import socket
+import ssl
 import threading
 import time
 from typing import List, Optional, Union, Dict, Any
@@ -69,7 +71,9 @@ class LLMResult:
     ok: bool
     text: Optional[str] = None
     vectors: Optional[List[List[float]]] = None
-    error_kind: Optional[str] = None  # 'NO_KEY', 'CIRCUIT_OPEN', 'RATE_LIMIT', 'TIMEOUT', 'BLOCKED', 'EMPTY', 'NETWORK_ERROR'
+    error_kind: Optional[str] = None  # 'NO_KEY', 'CIRCUIT_OPEN', 'RATE_LIMIT', 'TIMEOUT', 'BLOCKED', 'EMPTY',
+    # 'CONNECT_ERROR', 'DNS_ERROR', 'TLS_ERROR', 'CLIENT_ERROR_4XX', 'SERVER_ERROR_5XX',
+    # 'SERIAL_ERROR', 'UNKNOWN_ERROR:<classname>'  — never 'NETWORK_ERROR' for unrecognised exceptions
 
 
 class CircuitBreaker:
@@ -110,6 +114,87 @@ class CircuitBreaker:
                     return "half-open"
                 return "open"
             return "closed"
+
+
+# ---------------------------------------------------------------------------
+# Exception → error_kind classifier  (type-based, never string-scanning)
+# ---------------------------------------------------------------------------
+
+def _classify_exception(exc: Exception) -> str:
+    """Classify an LLM-call exception into a human-readable error_kind string.
+
+    Rules
+    -----
+    - Type-based checks first (precise).
+    - HTTP status code extracted from google-genai ClientError / ServerError
+      attributes when available.
+    - String scanning ONLY as a last resort for 429 / 5xx codes that some SDK
+      wrappers embed in the message without exposing a status attribute.
+    - Unknown exceptions → ``UNKNOWN_ERROR:<ClassName>`` — never ``NETWORK_ERROR``.
+    """
+    # --- serialisation errors (must be checked before anything else) --------
+    if isinstance(exc, (TypeError, ValueError)):
+        return "SERIAL_ERROR"
+
+    # --- timeouts -----------------------------------------------------------
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "TIMEOUT"
+
+    # --- TLS / SSL ----------------------------------------------------------
+    if isinstance(exc, ssl.SSLError):
+        return "TLS_ERROR"
+
+    # --- DNS ----------------------------------------------------------------
+    if isinstance(exc, socket.gaierror):
+        return "DNS_ERROR"
+
+    # --- connection refused / reset / aborted etc. --------------------------
+    if isinstance(exc, ConnectionError):                     # includes ConnectionRefusedError, ConnectionResetError
+        return "CONNECT_ERROR"
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (
+        111,    # ECONNREFUSED (Linux)
+        10061,  # WSAECONNREFUSED (Windows)
+        10013,  # WSAEACCES (Windows)
+    ):
+        return "CONNECT_ERROR"
+
+    # --- google-genai SDK exceptions ----------------------------------------
+    # Try extracting HTTP status from the exception object (google.genai wraps
+    # HTTP errors in its own exception types with a `status_code` or `code` attr).
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status is not None:
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            status = None
+    if status is not None:
+        if status == 429:
+            return "RATE_LIMIT"
+        if 400 <= status < 500:
+            return f"CLIENT_ERROR_{status}"
+        if 500 <= status < 600:
+            return "SERVER_ERROR_5XX"
+
+    # --- string fallback for SDKs that embed status only in the message -----
+    err_str = str(exc).lower()
+    if "429" in err_str or "resource_exhausted" in err_str:
+        return "RATE_LIMIT"
+    if "timeout" in err_str or "timed out" in err_str:
+        return "TIMEOUT"
+    for code in ("500", "502", "503", "504"):
+        if code in err_str:
+            return "SERVER_ERROR_5XX"
+
+    # --- httpx / urllib3 specific types (import-safe) -----------------------
+    cls_name = type(exc).__name__
+    cls_qual = type(exc).__qualname__
+    if "Timeout" in cls_name:
+        return "TIMEOUT"
+    if "Connect" in cls_name:
+        return "CONNECT_ERROR"
+
+    # --- truly unknown ------------------------------------------------------
+    return f"UNKNOWN_ERROR:{cls_qual}"
 
 
 # ---------------------------------------------------------------------------
@@ -293,19 +378,8 @@ class GeminiWrapper:
                 return LLMResult(ok=True, text=text.strip())
 
             except Exception as exc:
-                err_str = str(exc).lower()
-                is_rate_limit = "429" in err_str or "resource_exhausted" in err_str
-                is_server_error = "500" in err_str or "503" in err_str or "504" in err_str
-                is_timeout = "timeout" in err_str or "timed out" in err_str
-
-                if is_rate_limit:
-                    last_error_kind = "RATE_LIMIT"
-                elif is_timeout:
-                    last_error_kind = "TIMEOUT"
-                elif is_server_error:
-                    last_error_kind = "SERVER_ERROR"
-                else:
-                    last_error_kind = "NETWORK_ERROR"
+                last_error_kind = _classify_exception(exc)
+                is_retryable = last_error_kind in ("RATE_LIMIT", "TIMEOUT", "SERVER_ERROR_5XX", "CONNECT_ERROR")
 
                 elapsed_ms = int((time.monotonic() - t_start) * 1000)
                 logger.warning(
@@ -314,7 +388,7 @@ class GeminiWrapper:
                     self.config.GEMINI_CHAT_MODEL, flow, last_error_kind, prompt_chars, elapsed_ms,
                 )
 
-                if attempt < max_retries and (is_rate_limit or is_server_error or is_timeout):
+                if attempt < max_retries and is_retryable:
                     backoff = (2 ** attempt) + random.uniform(0.1, 0.4)
                     time.sleep(backoff)
                     continue
@@ -419,21 +493,10 @@ class GeminiWrapper:
                 return LLMResult(ok=True, vectors=vectors)
 
             except Exception as exc:
-                err_str = str(exc).lower()
-                is_rate_limit = "429" in err_str or "resource_exhausted" in err_str
-                is_server_error = "500" in err_str or "503" in err_str or "504" in err_str
-                is_timeout = "timeout" in err_str or "timed out" in err_str
+                last_error_kind = _classify_exception(exc)
+                is_retryable = last_error_kind in ("RATE_LIMIT", "TIMEOUT", "SERVER_ERROR_5XX", "CONNECT_ERROR")
 
-                if is_rate_limit:
-                    last_error_kind = "RATE_LIMIT"
-                elif is_timeout:
-                    last_error_kind = "TIMEOUT"
-                elif is_server_error:
-                    last_error_kind = "SERVER_ERROR"
-                else:
-                    last_error_kind = "NETWORK_ERROR"
-
-                if attempt < max_retries and (is_rate_limit or is_server_error or is_timeout):
+                if attempt < max_retries and is_retryable:
                     backoff = (2 ** attempt) + random.uniform(0.1, 0.4)
                     time.sleep(backoff)
                     continue

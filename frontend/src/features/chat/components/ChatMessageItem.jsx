@@ -50,6 +50,18 @@ export default function ChatMessageItem({ message }) {
             </span>
           )}
 
+          {/* Generated-by marker */}
+          {message.generated_by === 'gemini' && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#1E3A5F] text-[#34D399] text-[11px] font-medium">
+              ✦ Gemini
+            </span>
+          )}
+          {message.generated_by === 'template' && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#2A313C] text-[#9CA3AF] text-[11px] font-medium">
+              Template
+            </span>
+          )}
+
           {message.degraded && !message.no_data && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#3A2E0F] text-[#FBBF24] text-[11px] font-medium">
               <AlertCircle className="w-3 h-3" />

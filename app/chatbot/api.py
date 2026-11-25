@@ -108,6 +108,7 @@ class ChatResponse(BaseModel):
     no_data: bool = False
     message_id: Optional[str] = None
     created_at: Optional[str] = None
+    generated_by: Optional[str] = None  # 'gemini', 'template', 'refusal', 'notes'
 
 
 def format_iso_timestamp(dt) -> Optional[str]:
@@ -166,6 +167,7 @@ def send_chat_message(
         no_data=ans.get("no_data", False),
         message_id=body.client_message_id,
         created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        generated_by=ans.get("generated_by"),
     )
 
     if body.client_message_id:
@@ -294,7 +296,7 @@ def get_rule_nudges(
                         "id": stable_id,
                         "severity": "WARNING",
                         "message": f"Your last trade closed at −₹{abs(pnl):,.2f}. Want me to walk through it?",
-                        "created_at": exit_time
+                        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                     })
             except Exception:
                 pass
@@ -310,7 +312,7 @@ def get_rule_nudges(
             "id": stable_id,
             "severity": v.get("severity", "WARNING"),
             "message": v.get("message", "Rule warning detected."),
-            "created_at": v.get("created_at")
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         })
 
     # 3. Finished scenario session
@@ -328,7 +330,7 @@ def get_rule_nudges(
                             "id": stable_id,
                             "severity": "INFO",
                             "message": f"You completed a practice scenario decision on {latest_att.get('action', '').upper()}. Want to review your choices?",
-                            "created_at": att_time
+                            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                         })
                 except Exception:
                     pass
@@ -346,7 +348,7 @@ def get_rule_nudges(
                 "id": stable_id,
                 "severity": "WARNING",
                 "message": f"Discipline pattern notice: '{m_id.replace('_', ' ')}' flagged {top_m.get('count')} times. Want to see habit suggestions?",
-                "created_at": m_time or datetime.now(timezone.utc).isoformat()
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             })
 
     # Deduplicate by id and limit to 3

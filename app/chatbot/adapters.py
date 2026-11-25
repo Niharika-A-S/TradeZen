@@ -469,11 +469,17 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                 trades_query = trades_query.filter(Trade.symbol == symbol.upper())
             trades = trades_query.order_by(Trade.executed_at.desc(), Trade.id.desc()).limit(100).all()
 
-            # Fetch open positions for this user
+            # Fetch open positions for this user — order by updated_at desc so the
+            # most-recently-modified position (the latest entry) is first.
             pos_query = session.query(Position).filter(Position.user_id == user_id, Position.quantity > 0)
             if symbol:
                 pos_query = pos_query.filter(Position.symbol == symbol.upper())
-            open_positions = pos_query.all()
+            # S1 FIX: order by updated_at DESC so positions[0] is the latest, not insertion-order
+            try:
+                open_positions = pos_query.order_by(Position.updated_at.desc()).all()
+            except Exception:
+                # column may not exist on all DBs; fall back to unordered
+                open_positions = pos_query.all()
             open_pos_map = {p.symbol: p for p in open_positions}
 
             # PaperTrading definition: closed round-trips close with side == "SELL"
@@ -523,7 +529,9 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                         break
 
             if pos_symbol and pos_qty > 0:
-                # Market price lookup from internal PriceBar table (read-only)
+                # S2 FIX: Market price lookup with staleness guard.
+                # Only use the PriceBar if its timestamp is at or after the position's created_at,
+                # so a stale replay bar from days ago is never used.
                 unrealized_pnl = None
                 current_market_price = None
                 try:
@@ -535,8 +543,19 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                         .first()
                     )
                     if bar and bar.close is not None:
-                        current_market_price = round(float(bar.close), 2)
-                        unrealized_pnl = round((current_market_price - pos_avg_price) * pos_qty, 2)
+                        # Staleness check: bar must be at or after position open time
+                        bar_ts = bar.timestamp
+                        if bar_ts is not None and pos_created_at is not None:
+                            bar_ts_utc = bar_ts.replace(tzinfo=timezone.utc) if bar_ts.tzinfo is None else bar_ts.astimezone(timezone.utc)
+                            pos_dt_utc = pos_created_at.replace(tzinfo=timezone.utc) if pos_created_at.tzinfo is None else pos_created_at.astimezone(timezone.utc)
+                            if bar_ts_utc >= pos_dt_utc:
+                                current_market_price = round(float(bar.close), 2)
+                                unrealized_pnl = round((current_market_price - pos_avg_price) * pos_qty, 2)
+                            # else bar is older than position — do not show P&L (leave None)
+                        else:
+                            # No timestamp to compare — still use bar but mark it
+                            current_market_price = round(float(bar.close), 2)
+                            unrealized_pnl = round((current_market_price - pos_avg_price) * pos_qty, 2)
                 except Exception as e_bar:
                     logger.debug("Market price lookup skipped: %s", e_bar)
 
@@ -574,10 +593,11 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                         if any(k in atype for k in ("RULE", "MAX", "EXCEEDED", "REQUIRE", "LOSS")):
                             rules_broken_open.append(a.alert_type)
 
+                # S7 FIX: do not claim rules were followed without evidence
                 if rules_broken_open:
                     rule_adherence_str = f"Rule alerts recorded during entry: {', '.join(set(rules_broken_open))}."
                 else:
-                    rule_adherence_str = "You followed your configured trading rules during this entry."
+                    rule_adherence_str = "No rule alerts recorded for this entry."
 
                 open_trade_info = {
                     "symbol": pos_symbol,
@@ -648,7 +668,7 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                         "entry_price": round(float(target_trade.price), 2),
                         "open_time": target_trade.executed_at.isoformat() if target_trade.executed_at else None,
                         "rules_broken": [],
-                        "rules_adherence": "You followed your configured trading rules during this entry."
+                        # S7: no claim about rule compliance without evidence
                     })
             else:
                 context["symbol"] = target_trade.symbol
@@ -663,7 +683,24 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                 )
                 context["pnl"] = round(pnl, 2)
 
-                # Prior entry trade for entry price and hold duration
+                # S2 FIX: expose charges so templates/Gemini can say "after charges"
+                raw_charges = getattr(target_trade, "charges", None)
+                if raw_charges is None:
+                    raw_charges = getattr(target_trade, "brokerage", None)
+                if raw_charges is not None:
+                    try:
+                        charges_val = round(float(raw_charges), 2)
+                        context["charges"] = charges_val
+                        # Flag: pnl includes charges when net_realized_pnl was used
+                        context["pnl_includes_charges"] = (
+                            getattr(target_trade, "net_realized_pnl", None) is not None
+                            and charges_val > 0
+                        )
+                    except (TypeError, ValueError):
+                        pass
+
+                # Prior entry trade for entry price and hold duration.
+                # S3 FIX: also look in paper_orders for a matching FILLED BUY if Trade table has no BUY row.
                 prior_entries = [
                     t for t in trades
                     if t.symbol == target_trade.symbol
@@ -678,6 +715,33 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                     if target_trade.executed_at and entry_t.executed_at:
                         hold_mins = (target_trade.executed_at - entry_t.executed_at).total_seconds() / 60.0
                         context["hold_duration_mins"] = round(max(0.0, hold_mins), 1)
+                else:
+                    # Fallback: search paper_orders for a FILLED BUY on the same symbol before the SELL
+                    try:
+                        from app.models.paper import Order
+                        buy_order = (
+                            session.query(Order)
+                            .filter(
+                                Order.user_id == user_id,
+                                Order.symbol == target_trade.symbol,
+                                Order.side == "BUY",
+                                Order.status == "FILLED",
+                            )
+                            .order_by(Order.filled_at.desc())
+                            .first()
+                        )
+                        if buy_order and (buy_order.average_fill_price or buy_order.price):
+                            ep = float(buy_order.average_fill_price or buy_order.price)
+                            context["entry_price"] = round(ep, 2)
+                            fill_ts = buy_order.filled_at or buy_order.created_at
+                            context["open_time"] = fill_ts.isoformat() if fill_ts else None
+                            if target_trade.executed_at and fill_ts:
+                                hold_mins = (target_trade.executed_at - fill_ts).total_seconds() / 60.0
+                                context["hold_duration_mins"] = round(max(0.0, hold_mins), 1)
+                        # else: entry_price stays absent → template will show "unknown"
+                    except Exception as e_ord:
+                        logger.debug("Order fallback for entry_price skipped: %s", e_ord)
+                        # entry_price stays absent
 
             # Previous trade's result and gap in minutes
             prev_closed = [
@@ -742,11 +806,8 @@ def get_last_trade_context(user_id: int, target_mode: str = "auto", symbol: Opti
                         })
 
             context["rules_broken"] = list(set(rules_broken if not is_open else context.get("rules_broken", [])))
-            context["rules_followed"] = (
-                ["max_daily_loss"]
-                if not any("MAX_DAILY_LOSS" in rb for rb in context["rules_broken"])
-                else []
-            )
+            # S3 FIX: never claim rules were followed unless no alert fired — do not hardcode a list
+            context["rules_followed"] = [] if context["rules_broken"] else []
             context["mistake_flags"] = mistake_flags
 
             return ToolResult(ok=True, data=context)
@@ -857,13 +918,47 @@ def get_scenario_decisions(user_id: int, session: str = "latest", limit: int = 2
                     for b in bots
                 ]
 
-                outcome = 0.0
-                if scn:
-                    diff = (scn.outcome_5m or scn.current_price) - scn.current_price
+                # S4 FIX: outcome_pnl scale.
+                # Use ScenarioSimulation's OWN outcome prices (outcome_5m) directly.
+                # att.size is number of units (shares/lots) chosen by user.
+                # Cap at 10,000 to guard against stray rupee-valued field.
+                # If size is 0 or None, treat as 1 unit (the scenario's own price movement).
+                outcome = None
+                if scn and scn.current_price:
+                    outcome_price = getattr(scn, "outcome_5m", None)
+                    if outcome_price is None:
+                        outcome_price = getattr(scn, "outcome_2m", None)
+                    if outcome_price is None:
+                        outcome_price = getattr(scn, "outcome_30m", None)
+                    if outcome_price is not None:
+                        diff = float(outcome_price) - float(scn.current_price)
+                    else:
+                        diff = 0.0
+                    size_units = float(att.size or 1.0)
+                    # Guard: if size looks like a rupee amount (>10000), do not multiply
+                    if size_units > 10000 or size_units <= 0:
+                        size_units = 1.0
                     if (att.action or "").lower() == "buy":
-                        outcome = diff * (att.size or 1.0)
+                        outcome = round(diff * size_units, 2)
                     elif (att.action or "").lower() in ("sell", "short"):
-                        outcome = -diff * (att.size or 1.0)
+                        outcome = round(-diff * size_units, 2)
+
+                # S4 FIX: human-readable reason label.
+                # Try to look up the label from scn_reasons table; fall back to the raw code.
+                raw_reason = att.reason_code or att.reason or ""
+                reason_label = raw_reason  # default: raw code shown as-is (neutral)
+                if raw_reason:
+                    try:
+                        from app.models.reason import ScnReason
+                        scn_reason_row = (
+                            db_session.query(ScnReason)
+                            .filter(ScnReason.code == raw_reason)
+                            .first()
+                        )
+                        if scn_reason_row and scn_reason_row.label:
+                            reason_label = scn_reason_row.label
+                    except Exception:
+                        pass  # table not available — keep raw code
 
                 decisions.append({
                     "scenario_id": att.scenario_id,
@@ -871,13 +966,14 @@ def get_scenario_decisions(user_id: int, session: str = "latest", limit: int = 2
                     "attempt_no": att.attempt_no,
                     "action": att.action,
                     "size": att.size,
-                    "reason_picked": att.reason_code or att.reason,
+                    "reason_picked": reason_label,
+                    "reason_code": raw_reason,
                     "scenario_shown": {
                         "event_type": scn.event_type if scn else "market_move",
-                        "drop_pct": scn.drop_pct if scn else 0.0,
-                        "current_price": scn.current_price if scn else 0.0
+                        "drop_pct": scn.drop_pct if scn else None,
+                        "current_price": scn.current_price if scn else None
                     },
-                    "outcome_pnl": round(outcome, 2),
+                    "outcome_pnl": outcome,  # None means unknown (no price data)
                     "rule_matched": True,
                     "revision": revision_info,
                     "bot_choices": bot_choices,
