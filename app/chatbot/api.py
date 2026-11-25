@@ -384,6 +384,26 @@ def get_chat_health(user_id: int = Depends(get_current_user_id)):
 
     schema_status = validate_schema_health()
 
+    # Model health — never raises; model names are not secrets
+    try:
+        from .llm import get_model_health_status
+        _client = llm_client._get_client() if cfg.has_gemini_key else None
+        model_health = get_model_health_status(cfg, _client) if _client else {
+            "chat_model": cfg.GEMINI_CHAT_MODEL or "unset",
+            "chat_model_status": "unknown",
+            "embed_model": cfg.GEMINI_EMBED_MODEL,
+            "embed_model_status": "unknown",
+            "discovered_usable_models": [],
+        }
+    except Exception:
+        model_health = {
+            "chat_model": cfg.GEMINI_CHAT_MODEL or "unset",
+            "chat_model_status": "unknown",
+            "embed_model": cfg.GEMINI_EMBED_MODEL,
+            "embed_model_status": "unknown",
+            "discovered_usable_models": [],
+        }
+
     return {
         "mode": "full" if cfg.has_gemini_key else "limited",
         "embeddings": "active" if cfg.has_gemini_key else "fallback",
@@ -395,5 +415,5 @@ def get_chat_health(user_id: int = Depends(get_current_user_id)):
             "consecutive_failures": llm_client.circuit_breaker.consecutive_failures,
             "recovery_time_s": llm_client.circuit_breaker.recovery_time,
         },
-        "llm_model": cfg.GEMINI_CHAT_MODEL,
+        **model_health,
     }

@@ -16,9 +16,15 @@ DEFAULT_SQLITE_PATH = BACKEND_DIR / "chatbot.db"
 class ChatbotConfig(BaseSettings):
     """Chatbot module configuration."""
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_CHAT_MODEL: str = "gemini-3.8-flash"
+    # GEMINI_CHAT_MODEL: leave empty to auto-discover a usable model at runtime.
+    # Model names are not secrets and are reported in health/logs.
+    GEMINI_CHAT_MODEL: str = ""
+    # Comma-separated ordered list of fallback chat models to try if the primary fails with 404.
+    GEMINI_CHAT_MODEL_FALLBACKS: str = ""
     GEMINI_EMBED_MODEL: str = "gemini-embedding-001"
     EMBED_DIMENSIONS: int = 768
+    # Seconds before circuit breaker half-opens after tripping (transport / 5xx / 429 only).
+    LLM_BREAKER_RECOVERY_SECONDS: float = 45.0
     RAG_TOP_K: int = 4
     RAG_MIN_SIMILARITY: float = 0.55
     LLM_TIMEOUT_SECONDS: int = 20

@@ -90,55 +90,61 @@ def handle_health(args):
 
 def handle_llm_check(args):
     """Subcommand: llm-check.
-    Runs tiny call, ~3,000 chars call, and full-pipeline call.
-    Prints ONLY status, error class, and elapsed ms (no keys, no prompt text, no trade values).
+    Prints model used, status, tiny call result (status, error class, elapsed ms),
+    and discovered usable model names.
+    No keys, no prompt text, no trade values.
     """
     import time
-    from .llm import llm_client
+    from .llm import llm_client, get_model_health_status, _list_usable_generate_models
 
     print("--- TradeZen LLM Diagnostic Check ---")
+
+    client = llm_client._get_client()
+    if client is None:
+        print("Status: NO_KEY — GEMINI_API_KEY not set or client unavailable")
+        return
+
+    # Model health (cached, never raises)
+    try:
+        mh = get_model_health_status(cfg, client)
+        print(f"Chat model       : {mh.get('chat_model', 'unset')}")
+        print(f"Chat model status: {mh.get('chat_model_status', 'unknown')}")
+        print(f"Embed model      : {mh.get('embed_model', 'unset')}")
+        print(f"Embed model status: {mh.get('embed_model_status', 'unknown')}")
+        discovered = mh.get("discovered_usable_models", [])
+        print(f"Discovered models ({len(discovered)}): {', '.join(discovered) or 'none'}")
+    except Exception as exc:
+        print(f"Model health check failed: {type(exc).__name__}")
 
     # 1. Tiny call
     t0 = time.monotonic()
     res1 = llm_client.generate(
         system="Be concise.",
         messages=[{"role": "user", "content": "ping"}],
-        max_output_tokens=50,
+        max_output_tokens=10,
         flow="general"
     )
     ms1 = int((time.monotonic() - t0) * 1000)
     status1 = "OK" if res1.ok else "FAILED"
     err1 = res1.error_kind if not res1.ok else "None"
-    print(f"1. Tiny Call: status={status1} error_class={err1} elapsed_ms={ms1}")
+    model1 = res1.model_used or "None"
+    print(f"Tiny call: status={status1} error_class={err1} model={model1} elapsed_ms={ms1}")
 
-    # 2. ~3,000 characters prompt call
-    long_prompt = "Analyze trading summary: " + ("word " * 600)
-    t0 = time.monotonic()
-    res2 = llm_client.generate(
-        system="Be concise.",
-        messages=[{"role": "user", "content": long_prompt}],
-        max_output_tokens=100,
-        flow="general"
-    )
-    ms2 = int((time.monotonic() - t0) * 1000)
-    status2 = "OK" if res2.ok else "FAILED"
-    err2 = res2.error_kind if not res2.ok else "None"
-    print(f"2. ~3,000 Chars Call: status={status2} error_class={err2} elapsed_ms={ms2}")
-
-    # 3. Full pipeline call
+    # 2. Full pipeline call
     user_id = getattr(args, "user_id", 1) or 1
     t0 = time.monotonic()
     try:
         from .brain import answer
-        ans = answer(user_id=user_id, message="Explain my last trade")
-        ms3 = int((time.monotonic() - t0) * 1000)
-        status3 = "OK" if not ans.get("degraded", False) else "DEGRADED"
-        err3 = ans.get("degraded_reason") or "None"
-        route3 = ans.get("route", "UNKNOWN")
-        print(f"3. Full Pipeline Call (user_id={user_id}): status={status3} route={route3} error_class={err3} elapsed_ms={ms3}")
+        ans = answer(user_id=user_id, message="hi")
+        ms2 = int((time.monotonic() - t0) * 1000)
+        status2 = "OK" if not ans.get("degraded", False) else "DEGRADED"
+        err2 = ans.get("degraded_reason") or "None"
+        route2 = ans.get("route", "UNKNOWN")
+        genby2 = ans.get("generated_by", "?")
+        print(f"Pipeline call: status={status2} route={route2} generated_by={genby2} error_class={err2} elapsed_ms={ms2}")
     except Exception as exc:
-        ms3 = int((time.monotonic() - t0) * 1000)
-        print(f"3. Full Pipeline Call: status=EXCEPTION error_class={type(exc).__name__} elapsed_ms={ms3}")
+        ms2 = int((time.monotonic() - t0) * 1000)
+        print(f"Pipeline call: status=EXCEPTION error_class={type(exc).__name__} elapsed_ms={ms2}")
 
     print("--------------------------------------")
 

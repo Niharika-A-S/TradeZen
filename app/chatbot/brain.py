@@ -1722,7 +1722,12 @@ def answer(user_id: int, message: str, history: Optional[List[Dict[str, str]]] =
         valid_hits = [h for h in hits if h.score >= cfg.RAG_MIN_SIMILARITY]
 
         if valid_hits:
-            sources = [{"id": h.id, "title": h.title, "source_url": h.source_url} for h in valid_hits]
+            sources = []
+            _seen_src: set = set()
+            for h in valid_hits:
+                if h.id not in _seen_src:
+                    _seen_src.add(h.id)
+                    sources.append({"id": h.id, "title": h.title, "source_url": h.source_url})
             top_hit = valid_hits[0]
             trimmed_content = re.sub(r"\[\d+\]", "", top_hit.content).strip()
             trimmed_content = re.sub(r"  +", " ", trimmed_content)

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, Database, AlertCircle } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 import { renderFormattedMessage } from './MessageRenderer';
 
 export default function ChatMessageItem({ message }) {
@@ -43,60 +43,58 @@ export default function ChatMessageItem({ message }) {
       {/* Meta tags for bot replies */}
       {!isUser && (
         <div className="flex flex-wrap items-center gap-2 mt-1 px-1 text-xs text-[#9CA3AF]">
-          {message.used_data && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#1E3A5F] text-[#60A5FA] text-[11px] font-medium">
-              <Database className="w-3 h-3" />
-              Based on your account data
-            </span>
-          )}
+          {/* Source Chips — de-duplicated by id */}
+          {message.sources && message.sources.length > 0 && (() => {
+            const seen = new Set();
+            const unique = message.sources.filter(src => {
+              const key = src.id ?? src.title;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+            return unique.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                <span className="text-[11px] text-[#9CA3AF]">Sources:</span>
+                {unique.map((src) => {
+                  const hasUrl = src.source_url && (src.source_url.startsWith('http://') || src.source_url.startsWith('https://'));
+                  return hasUrl ? (
+                    <a
+                      key={src.id ?? src.title}
+                      href={src.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[#2A313C] bg-[#1A1F29] text-[#3B82F6] hover:text-[#60A5FA] text-[11px]"
+                    >
+                      <span>{src.title}</span>
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  ) : (
+                    <span
+                      key={src.id ?? src.title}
+                      className="px-2 py-0.5 rounded border border-[#2A313C] bg-[#1A1F29] text-[#D1D5DB] text-[11px]"
+                    >
+                      {src.title}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : null;
+          })()}
 
-          {/* Generated-by marker */}
-          {message.generated_by === 'gemini' && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#1E3A5F] text-[#34D399] text-[11px] font-medium">
-              ✦ Gemini
-            </span>
-          )}
-          {message.generated_by === 'template' && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#2A313C] text-[#9CA3AF] text-[11px] font-medium">
-              Template
-            </span>
-          )}
-
-          {message.degraded && !message.no_data && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#3A2E0F] text-[#FBBF24] text-[11px] font-medium">
-              <AlertCircle className="w-3 h-3" />
-              Limited mode{message.degraded_reason ? ` (${message.degraded_reason})` : ''}
-            </span>
-          )}
-
-          {/* Source Chips */}
-          {message.sources && message.sources.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-              <span className="text-[11px] text-[#9CA3AF]">Sources:</span>
-              {message.sources.map((src, idx) => {
-                const hasUrl = src.source_url && (src.source_url.startsWith('http://') || src.source_url.startsWith('https://'));
-                return hasUrl ? (
-                  <a
-                    key={`src-${idx}`}
-                    href={src.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[#2A313C] bg-[#1A1F29] text-[#3B82F6] hover:text-[#60A5FA] text-[11px]"
-                  >
-                    <span>{src.title}</span>
-                    <ExternalLink className="w-2.5 h-2.5" />
-                  </a>
-                ) : (
-                  <span
-                    key={`src-${idx}`}
-                    className="px-2 py-0.5 rounded border border-[#2A313C] bg-[#1A1F29] text-[#D1D5DB] text-[11px]"
-                  >
-                    {src.title}
+          {/* Debug line — only when localStorage tz_chat_debug === '1' */}
+          {(() => {
+            try {
+              if (localStorage.getItem('tz_chat_debug') === '1') {
+                const parts = [message.generated_by, message.degraded_reason].filter(Boolean).join(' ');
+                return parts ? (
+                  <span className="text-[10px] text-[#6B7280] mt-0.5 px-1">
+                    {`debug: ${parts}`}
                   </span>
-                );
-              })}
-            </div>
-          )}
+                ) : null;
+              }
+            } catch (e) {}
+            return null;
+          })()}
 
           {formattedTime && <span className="ml-auto text-[10px] text-[#9CA3AF]">{formattedTime}</span>}
         </div>
